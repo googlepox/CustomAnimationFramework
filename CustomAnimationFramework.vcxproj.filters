@@ -1,0 +1,30 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="dllmain.c" />
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="Hooks.cpp" />
+    <ClCompile Include="..\OBSE\obse\obse_common\SafeWrite.cpp" />
+    <ClCompile Include="Conditions.cpp" />
+    <ClCompile Include="Config.cpp" />
+    <ClCompile Include="Core.cpp" />
+    <ClCompile Include="..\OBSE\obse\obse\NiTypes.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="exports.def" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Hooks.h" />
+    <ClInclude Include="lib\simpleINI.hpp">
+      <Filter>lib</Filter>
+    </ClInclude>
+    <ClInclude Include="Conditions.h" />
+    <ClInclude Include="Config.h" />
+    <ClInclude Include="Core.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="lib">
+      <UniqueIdentifier>{afb78e08-30bf-4f6b-b0c8-050003352277}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
