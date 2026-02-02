@@ -683,6 +683,7 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 
 			_MESSAGE("CAF: seq present in MULTIPLE = %d", found);
 
+
 			return entry.seq;
 		}
 	}
@@ -693,88 +694,88 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 
 AnimSequenceMultiple* (__thiscall* NewAnimSequenceMultiple)(AnimSequenceMultiple*, AnimSequenceSingle*) = (AnimSequenceMultiple * (__thiscall*)(AnimSequenceMultiple*, AnimSequenceSingle*))0x00473D90;
 AnimSequenceMultiple* __fastcall NewAnimSequenceMultipleHook(
-	AnimSequenceMultiple* This,
-	UInt32,
-	AnimSequenceSingle* sourceSingle
+    AnimSequenceMultiple* This,
+    UInt32,
+    AnimSequenceSingle* sourceSingle
 )
 {
-	_MESSAGE(
-		"CAF[NASM]: ENTER This=%p sourceSingle=%p",
-		This,
-		sourceSingle
-	);
+    _MESSAGE(
+        "CAF[NASM]: ENTER This=%p sourceSingle=%p",
+        This,
+        sourceSingle
+    );
 
-	AnimSequenceMultiple* seq =
-		NewAnimSequenceMultiple(This, sourceSingle);
+    AnimSequenceMultiple* seq =
+        NewAnimSequenceMultiple(This, sourceSingle);
 
-	_MESSAGE(
-		"CAF[NASM]: after original seq=%p",
-		seq
-	);
+    _MESSAGE(
+        "CAF[NASM]: after original seq=%p",
+        seq
+    );
 
-	if (!seq)
-	{
-		_MESSAGE("CAF[NASM]: seq == nullptr → bail");
-		return seq;
-	}
+    if (!seq)
+    {
+        _MESSAGE("CAF[NASM]: seq == nullptr → bail");
+        return seq;
+    }
 
-	// one-time guard
-	if (g_cafInjectedMultiples.contains(seq))
-	{
-		_MESSAGE(
-			"CAF[NASM]: seq %p already injected → bail",
-			seq
-		);
-		return seq;
-	}
+    // one-time guard
+    if (g_cafInjectedMultiples.contains(seq))
+    {
+        _MESSAGE(
+            "CAF[NASM]: seq %p already injected → bail",
+            seq
+        );
+        return seq;
+    }
 
-	size_t totalInjected = 0;
+    size_t totalInjected = 0;
 
-	_MESSAGE(
-		"CAF[NASM]: starting unconditional injection, CAF groups=%zu",
-		g_cafSequencesByGroup.size()
-	);
+    _MESSAGE(
+        "CAF[NASM]: starting unconditional injection, CAF groups=%zu",
+        g_cafSequencesByGroup.size()
+    );
 
-	for (auto& [group, cafVec] : g_cafSequencesByGroup)
-	{
-		_MESSAGE(
-			"CAF[NASM]: group %u has %zu CAF sequences",
-			group,
-			cafVec.size()
-		);
+    for (auto& [group, cafVec] : g_cafSequencesByGroup)
+    {
+        _MESSAGE(
+            "CAF[NASM]: group %u has %zu CAF sequences",
+            group,
+            cafVec.size()
+        );
 
-		for (CAFSequence& caf : cafVec)
-		{
-			_MESSAGE(
-				"CAF[NASM]: considering caf.seq=%p",
-				caf.seq
-			);
+        for (CAFSequence& caf : cafVec)
+        {
+            _MESSAGE(
+                "CAF[NASM]: considering caf.seq=%p",
+                caf.seq
+            );
 
-			if (!caf.seq)
-			{
-				_MESSAGE("CAF[NASM]: caf.seq == nullptr → skip");
-				continue;
-			}
+            if (!caf.seq)
+            {
+                _MESSAGE("CAF[NASM]: caf.seq == nullptr → skip");
+                continue;
+            }
 
-			seq->AddAnimGroupSequence(caf.seq);
-			totalInjected++;
+            seq->AddAnimGroupSequence(caf.seq);
+            totalInjected++;
 
-			_MESSAGE(
-				"CAF[NASM]: INJECTED caf.seq=%p",
-				caf.seq
-			);
-		}
-	}
+            _MESSAGE(
+                "CAF[NASM]: INJECTED caf.seq=%p",
+                caf.seq
+            );
+        }
+    }
 
-	g_cafInjectedMultiples.insert(seq);
+    g_cafInjectedMultiples.insert(seq);
 
-	_MESSAGE(
-		"CAF[NASM]: injection complete seq=%p totalInjected=%zu",
-		seq,
-		totalInjected
-	);
+    _MESSAGE(
+        "CAF[NASM]: injection complete seq=%p totalInjected=%zu",
+        seq,
+        totalInjected
+    );
 
-	return seq;
+    return seq;
 }
 
 
