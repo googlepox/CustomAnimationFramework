@@ -29,3 +29,8 @@ bool ConditionsPass(
     Actor* actor,
     UInt32 group
 );
+
+bool ConditionsPassPreActor(
+    const AnimOverrideRule& rule,
+    UInt32 group
+);

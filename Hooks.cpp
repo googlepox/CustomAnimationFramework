@@ -3,6 +3,7 @@
 #include "obse/GameAPI.h"
 #include "obse/GameObjects.h"
 #include "obse/NiNodes.h"
+#include "obse/NiControllers.h"
 #include <obse_common/SafeWrite.h>
 
 #include <windows.h>
@@ -12,8 +13,35 @@
 #include <Conditions.h>
 #include <Core.h>
 #include <unordered_set>
+#include <utility.h>
 
 #define AnimString "_CAF"
+
+bool g_cafDebug = true;
+
+// Remove these classes:
+// class AnimSequenceSingleEx : public AnimSequenceSingle
+// class AnimSequenceMultipleEx : public AnimSequenceMultiple
+
+// Use maps instead:
+std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_singleCAFCache;
+std::unordered_map<AnimSequenceMultiple*, std::unordered_map<int, BSAnimGroupSequence*>> g_multipleCAFCache;
+
+static std::unordered_set<AnimSequenceMultiple*> g_cafInjectedMultiples;
+
+
+struct CAFSequence
+{
+	BSAnimGroupSequence* seq;          // the CAF animation sequence
+	const AnimOverrideRule* rule;      // rule that owns it
+};
+
+static std::unordered_map<
+	UInt32,                            // animGroup
+	std::vector<CAFSequence>
+> g_cafSequencesByGroup;
+
+
 
 class Jumpers
 {
@@ -200,6 +228,9 @@ public:
 	};
 };
 
+thread_local bool g_inLoadAnimGroup = false;
+thread_local BSAnimGroupSequence* g_pendingCAFSequence = nullptr;
+
 UInt32 g_originalAddSingle;
 UInt32 g_originalAddMultiple;
 UInt32 g_originalGetSingle;
@@ -212,141 +243,613 @@ void* g_trampGetSingle = nullptr;
 void* g_trampGetMultiple = nullptr;
 void* g_trampAddAnimation = nullptr;
 
-class ActorAnimDataEx : public ActorAnimData
+ActorAnimData* g_currentAnimData = nullptr;
+
+struct CAFCondition
 {
-public:
-	NiTListBase<BSAnimGroupSequence>* cafAnims;
+	AnimConditionFn fn;
+	std::string     arg;
 };
 
-class AnimSequenceSingleEx : public AnimSequenceSingle
+struct CAFAnimEntry
 {
-public:
-	BSAnimGroupSequence* cafAnim = nullptr;
+	BSAnimGroupSequence* seq;
+	const AnimOverrideRule* rule;
 };
 
-class AnimSequenceMultipleEx : public AnimSequenceMultiple
+struct CAFAnimData
 {
-public:
-	BSAnimGroupSequence* cafAnim = nullptr;
+	std::vector<CAFAnimEntry> entries;
 };
 
-static ActorAnimDataEx* AnimDataAnimation = NULL;
+std::unordered_map<ActorAnimData*, CAFAnimData> g_cafAnimData;
+
+static std::unordered_map<
+	UInt32,
+	std::vector<BSAnimGroupSequence*>
+> g_cafSequences;
+
+std::unordered_map<ActorAnimData*, NiTListBase<CAFAnimEntry>*> g_cafAnimsByActor;
+
+inline const char* GetFileName(const char* path)
+{
+	if (!path)
+		return nullptr;
+
+	const char* lastSlash = strrchr(path, '\\');
+	if (lastSlash)
+		return lastSlash + 1;
+
+	return path;
+}
+
+static bool StrContainsI(const char* haystack, const char* needle)
+{
+	if (!haystack || !needle || !*needle)
+		return false;
+
+	std::string h(haystack);
+	std::string n(needle);
+
+	std::transform(h.begin(), h.end(), h.begin(),
+		[](unsigned char c) { return std::tolower(c); });
+
+	std::transform(n.begin(), n.end(), n.begin(),
+		[](unsigned char c) { return std::tolower(c); });
+
+	return h.find(n) != std::string::npos;
+}
+
+
+static bool EndsWithI(const char* fullPath, const char* fileName)
+{
+	if (!fullPath || !fileName)
+		return false;
+	_MESSAGE("fullPath: %s", fullPath);
+	_MESSAGE("fileName: %s", fileName);
+	size_t fullLen = strlen(fullPath);
+	size_t fileLen = strlen(fileName);
+
+	if (fileLen == 0 || fileLen > fullLen)
+		return false;
+
+	const char* tail = fullPath + (fullLen - fileLen);
+
+	return _stricmp(tail, fileName) == 0;
+}
+
+static std::string NormalizeAnimString(const char* s)
+{
+	std::string out;
+	if (!s) return out;
+
+	for (; *s; ++s)
+	{
+		char c = *s;
+		if (isalnum((unsigned char)c))
+			out.push_back((char)tolower((unsigned char)c));
+	}
+	return out;
+}
+
+static bool AnimStringMatch(const char* filePath, const char* rule)
+{
+	if (!filePath || !rule || !*rule)
+		return false;
+
+	std::string f = NormalizeAnimString(filePath);
+	std::string r = NormalizeAnimString(rule);
+
+	return f.find(r) != std::string::npos;
+}
+
+
+void RegisterCAFSequence(BSAnimGroupSequence* seq)
+{
+	if (!seq || !seq->animGroup || !seq->filePath)
+		return;
+	UInt32 group = seq->animGroup->animGroup;
+
+	auto it = g_animOverrideRules.find(group);
+	if (it == g_animOverrideRules.end())
+		return;
+	const char* fileName = GetFileName(seq->filePath);
+
+	for (const AnimOverrideRule& rule : it->second)
+	{
+		// Case-insensitive filename match (no folder)
+		if (AnimStringMatch(fileName, rule.replacementFile.c_str()))
+		{
+
+			g_cafSequencesByGroup[group].push_back({
+				seq,
+				&rule
+				});
+
+			break; // one rule per sequence
+		}
+	}
+}
+
 
 ActorAnimData* (__thiscall* NewActorAnimData)(ActorAnimData*) = (ActorAnimData * (__thiscall*)(ActorAnimData*))0x473EB0;
 ActorAnimData* __fastcall NewActorAnimDataHook(ActorAnimData* This, UInt32 edx)
 {
-	return NewActorAnimData(This);
+	_MESSAGE("NewActorAnimDataHook");
+	ActorAnimData* result = NewActorAnimData(This);
 
+	// Allocate CAF list
+	auto* cafList = (NiTListBase<CAFAnimEntry>*)FormHeap_Allocate(sizeof(NiTListBase<CAFAnimEntry>));
+	*(void**)cafList = (void*)0x00A3C748;
+	cafList->start = nullptr;
+	cafList->end = nullptr;
+	cafList->numItems = 0;
+
+	// Store in map
+	g_cafAnimsByActor[result] = cafList;
+
+	return result;
 }
 
 ActorAnimData* (__thiscall* DisposeActorAnimData)(ActorAnimData*) = (ActorAnimData * (__thiscall*)(ActorAnimData*))0x475B60;
 ActorAnimData* __fastcall DisposeActorAnimDataHook(ActorAnimData* This, UInt32 edx)
-{
-
-	
+{	
 	return DisposeActorAnimData(This);
-
 }
 
 bool(__thiscall* AddAnimation)(ActorAnimData*, kfModel*, UInt8) = (bool(__thiscall*)(ActorAnimData*, kfModel*, UInt8))0x474070;
 bool __fastcall AddAnimationHook(ActorAnimData* This, UInt32 edx, kfModel* Model, UInt8 Arg)
 {
-	return (bool)ThisStdCall(g_originalAddAnimation, This, Model, Arg);
+	if (g_cafDebug)
+		_MESSAGE("AddAnimation called, model=%p", Model);
 
-}
-static void AddCAFAnimGroupSequence(BSAnimGroupSequence* seq)
-{
-	if (!seq)
-		return;
+	// Call original
+	bool result = (bool)ThisStdCall(g_originalAddAnimation, This, Model, Arg);
 
-	// ONLY store pointer, no refcounting here
-	NiTListBase<BSAnimGroupSequence>* caf = AnimDataAnimation->cafAnims;
-
-	for (auto it = caf->start; it; it = it->next)
+	// After vanilla animations are added, add CAF animations
+	if (g_currentAnimActor && result)
 	{
-		if (it->data == seq)
-			return;
+		UInt32 group = g_currentAnimGroup;
+
+		auto ruleIt = g_animOverrideRules.find(group);
+		if (ruleIt != g_animOverrideRules.end())
+		{
+			for (const AnimOverrideRule& rule : ruleIt->second)
+			{
+				if (ConditionsPass(rule, g_currentAnimActor, group))
+				{
+					// TODO: Load the CAF KF file here
+					// You need to create a kfModel* for the CAF file
+					// Then call AddAnimation again with it
+
+					if (g_cafDebug)
+					{
+						_MESSAGE(
+							"CAF: Should load additional KF: %s",
+							rule.replacementFile.c_str()
+						);
+					}
+				}
+			}
+		}
 	}
 
-	auto* node = caf->AllocateNode();
-	node->data = seq;
-	node->next = nullptr;
-	node->prev = caf->end;
+	return result;
+}
+static void AddCAFAnimGroupSequence(
+	ActorAnimData* animData,
+	BSAnimGroupSequence* seq,
+	const AnimOverrideRule& rule
+)
+{
+	if (!animData || !seq)
+		return;
 
-	if (caf->end)
-		caf->end->next = node;
-	else
-		caf->start = node;
+	CAFAnimData& caf = g_cafAnimData[animData];
 
-	caf->end = node;
-	++caf->numItems;
+	caf.entries.push_back({
+		seq,
+		&rule
+		});
+
+	_MESSAGE(
+		"CAF: registered CAF anim '%s'",
+		seq->filePath
+	);
+}
+
+
+struct PendingCAF
+{
+	UInt32 group;
+	std::string path;
+};
+
+static std::vector<PendingCAF> g_pendingCAF;
+
+BSAnimGroupSequence* FindCAFSequenceForGroup(
+	UInt32 animGroup,
+	const AnimOverrideRule& rule
+)
+{
+	auto it = g_cafSequencesByGroup.find(animGroup);
+	if (it == g_cafSequencesByGroup.end())
+		return nullptr;
+
+	for (const CAFSequence& caf : it->second)
+	{
+		if (!caf.seq || !caf.rule)
+			continue;
+
+		if (caf.rule != &rule)
+			continue;
+		return caf.seq;
+	}
+
+	return nullptr;
 }
 
 
 void(__thiscall* AddSingle)(AnimSequenceSingle*, BSAnimGroupSequence*) = (void(__thiscall*)(AnimSequenceSingle*, BSAnimGroupSequence*))0x470BA0;
-void __fastcall AddSingleHook(AnimSequenceSingle* This, UInt32 edx, BSAnimGroupSequence* AnimGroupSequence)
+void __fastcall AddSingleHook(
+	AnimSequenceSingle* This,
+	void*,
+	BSAnimGroupSequence* anim
+)
 {
+	RegisterCAFSequence(anim);
+	if (g_inLoadAnimGroup &&
+		g_pendingCAFSequence &&
+		anim &&
+		anim->animGroup &&
+		anim->animGroup->animGroup == g_currentAnimGroup)
+	{
+		anim->filePath = CopyString(g_pendingCAFSequence->filePath);
 
-	//if (AnimGroupSequence && AnimGroupSequence->animGroup) AddCAFAnimGroupSequence(AnimGroupSequence);
-	ThisStdCall(g_originalAddSingle, This, AnimGroupSequence);
+		if (g_cafDebug)
+			_MESSAGE("CAF: Replaced SINGLE sequence path");
+	}
 
+	ThisStdCall(g_originalAddSingle, This, anim);
 }
+
+
+
+
 
 void(__thiscall* AddMultiple)(AnimSequenceMultiple*, BSAnimGroupSequence*) = (void(__thiscall*)(AnimSequenceMultiple*, BSAnimGroupSequence*))0x471930;
-void __fastcall AddMultipleHook(AnimSequenceMultiple* This, UInt32 edx, BSAnimGroupSequence* AnimGroupSequence)
+void __fastcall AddMultipleHook(
+	AnimSequenceMultiple* This,
+	UInt32,
+	BSAnimGroupSequence* seq
+)
 {
 
-	if (AnimGroupSequence->animGroup) {}
-		//AddCAFAnimGroupSequence(AnimGroupSequence);
-	else
-		ThisStdCall(g_originalAddMultiple, This, AnimGroupSequence);
-
+	AddMultiple(This, seq);
 }
+
+
+
+BSAnimGroupSequence* FindCAFAnimation(
+	Actor* actor,
+	UInt32 baseGroup)
+{
+	if (!actor)
+		return nullptr;
+
+	ActorAnimData* animData = actor->GetAnimData();
+	if (!animData)
+		return nullptr;
+
+	// Use map lookup instead of casting
+	auto cafIt = g_cafAnimsByActor.find(animData);
+	if (cafIt == g_cafAnimsByActor.end())
+		return nullptr;
+
+	NiTListBase<CAFAnimEntry>* cafList = cafIt->second;
+	if (!cafList || cafList->numItems == 0)
+		return nullptr;
+
+	// Rest of your logic...
+	for (auto it = cafList->start; it; it = it->next)
+	{
+		CAFAnimEntry* entry = it->data;
+		if (!entry || !entry->seq || !entry->seq->animGroup)
+			continue;
+
+		UInt32 cafGroup = entry->seq->animGroup->animGroup;
+
+		if (cafGroup != baseGroup)
+			continue;
+
+		if (!entry->rule)
+			continue;
+
+		bool passed = true;
+		for (const AnimConditionEntry& cond : entry->rule->conditions)
+		{
+			if (!cond.fn(actor, baseGroup, cond.arg.c_str()))
+			{
+				passed = false;
+				break;
+			}
+		}
+
+		if (passed)
+			return entry->seq;
+	}
+
+	return nullptr;
+}
+
 
 BSAnimGroupSequence* (__thiscall* GetAnimGroupSequenceSingle)(AnimSequenceSingle*, int) = (BSAnimGroupSequence * (__thiscall*)(AnimSequenceSingle*, int))0x00471710;
-BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingle* This, UInt32 edx, int Index)
+BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(
+	AnimSequenceSingle* This,
+	UInt32,
+	int index
+)
 {
+	BSAnimGroupSequence* base =
+		(BSAnimGroupSequence*)ThisStdCall(
+			g_originalGetSingle,
+			This,
+			index
+		);
 
-	return (BSAnimGroupSequence*)ThisStdCall(g_originalGetSingle, This, Index);
+	if (g_inLoadAnimGroup &&
+		g_pendingCAFSequence &&
+		base &&
+		base->animGroup &&
+		base->animGroup->animGroup ==
+		g_pendingCAFSequence->animGroup->animGroup)
+	{
+		if (g_cafDebug)
+		{
+			_MESSAGE(
+				"CAF: Replacing SINGLE with %s",
+				g_pendingCAFSequence->filePath
+			);
+		}
 
+		return g_pendingCAFSequence;
+	}
+
+	return base;
 }
 
+
+
+
+
+
 BSAnimGroupSequence* (__thiscall* GetAnimGroupSequenceMultiple)(AnimSequenceMultiple*, int) = (BSAnimGroupSequence * (__thiscall*)(AnimSequenceMultiple*, int))0x00470BF0;
-BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(AnimSequenceMultiple* This, UInt32 edx, int Index)
+BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
+	AnimSequenceMultiple* sequence,
+	void*,
+	int index
+)
 {
+	// Let vanilla decide first
+	BSAnimGroupSequence* base =
+		(BSAnimGroupSequence*)ThisStdCall(
+			g_originalGetMultiple,
+			sequence,
+			index
+		);
 
-	return (BSAnimGroupSequence*)ThisStdCall(g_originalGetMultiple, This, Index);
+	if (!base || !sequence)
+		return base;
 
+	// We MUST have actor context here
+	Actor* actor = g_currentAnimActor;
+	if (!actor || !base->animGroup)
+		return base;
+
+	UInt32 group = base->animGroup->animGroup;
+
+	// Do we have CAF data for THIS container?
+	auto it = g_cafAnimData.find(actor->GetAnimData());
+	if (it == g_cafAnimData.end())
+		return base;
+
+	// Try CAF overrides
+	for (const CAFAnimEntry& entry : it->second.entries)
+	{
+		if (!entry.seq || !entry.rule)
+			continue;
+
+		if (ConditionsPass(*entry.rule, actor, group))
+		{
+			if (g_cafDebug)
+			{
+				_MESSAGE(
+					"CAF: MULTIPLE select group %u\n  %s\n  -> %s",
+					group,
+					base->filePath,
+					entry.seq->filePath
+				);
+			}
+
+			bool found = false;
+			for (auto* it = sequence->Anims->start; it; it = it->next)
+			{
+				if (it->data == entry.seq)
+				{
+					found = true;
+					break;
+				}
+			}
+
+			_MESSAGE("CAF: seq present in MULTIPLE = %d", found);
+
+			return entry.seq;
+		}
+	}
+
+	// Fallback to vanilla
+	return base;
 }
 
 AnimSequenceMultiple* (__thiscall* NewAnimSequenceMultiple)(AnimSequenceMultiple*, AnimSequenceSingle*) = (AnimSequenceMultiple * (__thiscall*)(AnimSequenceMultiple*, AnimSequenceSingle*))0x00473D90;
-AnimSequenceMultiple* __fastcall NewAnimSequenceMultipleHook(AnimSequenceMultiple* This, UInt32 edx, AnimSequenceSingle* SourceAnimSequence)
+AnimSequenceMultiple* __fastcall NewAnimSequenceMultipleHook(
+	AnimSequenceMultiple* This,
+	UInt32,
+	AnimSequenceSingle* sourceSingle
+)
 {
+	_MESSAGE(
+		"CAF[NASM]: ENTER This=%p sourceSingle=%p",
+		This,
+		sourceSingle
+	);
 
-	return NewAnimSequenceMultiple(This, SourceAnimSequence);
+	AnimSequenceMultiple* seq =
+		NewAnimSequenceMultiple(This, sourceSingle);
 
+	_MESSAGE(
+		"CAF[NASM]: after original seq=%p",
+		seq
+	);
+
+	if (!seq)
+	{
+		_MESSAGE("CAF[NASM]: seq == nullptr → bail");
+		return seq;
+	}
+
+	// one-time guard
+	if (g_cafInjectedMultiples.contains(seq))
+	{
+		_MESSAGE(
+			"CAF[NASM]: seq %p already injected → bail",
+			seq
+		);
+		return seq;
+	}
+
+	size_t totalInjected = 0;
+
+	_MESSAGE(
+		"CAF[NASM]: starting unconditional injection, CAF groups=%zu",
+		g_cafSequencesByGroup.size()
+	);
+
+	for (auto& [group, cafVec] : g_cafSequencesByGroup)
+	{
+		_MESSAGE(
+			"CAF[NASM]: group %u has %zu CAF sequences",
+			group,
+			cafVec.size()
+		);
+
+		for (CAFSequence& caf : cafVec)
+		{
+			_MESSAGE(
+				"CAF[NASM]: considering caf.seq=%p",
+				caf.seq
+			);
+
+			if (!caf.seq)
+			{
+				_MESSAGE("CAF[NASM]: caf.seq == nullptr → skip");
+				continue;
+			}
+
+			seq->AddAnimGroupSequence(caf.seq);
+			totalInjected++;
+
+			_MESSAGE(
+				"CAF[NASM]: INJECTED caf.seq=%p",
+				caf.seq
+			);
+		}
+	}
+
+	g_cafInjectedMultiples.insert(seq);
+
+	_MESSAGE(
+		"CAF[NASM]: injection complete seq=%p totalInjected=%zu",
+		seq,
+		totalInjected
+	);
+
+	return seq;
 }
 
-TESAnimGroup* (__cdecl* LoadAnimGroup)(NiControllerSequence*, char*) = (TESAnimGroup * (__cdecl*)(NiControllerSequence*, char*))0x0051B490;
-TESAnimGroup* __cdecl LoadAnimGroupHook(NiControllerSequence* ControllerSequence, char* FilePath)
+
+
+
+
+
+
+
+
+
+
+void __stdcall CAF_NewAnimSequenceSingle_PostCtor(
+	AnimSequenceSingle* seq,
+	BSAnimGroupSequence* source
+)
 {
+	_MESSAGE("CAF_NewAnimSequenceSingle_PostCtor");
+	if (!seq || !source || !source->animGroup)
+		return;
 
-	return (TESAnimGroup*)LoadAnimGroup(ControllerSequence, FilePath);
+	UInt32 group = source->animGroup->animGroup;
 
+	auto it = g_animOverrideRules.find(group);
+	if (it == g_animOverrideRules.end())
+		return;
+
+	for (const AnimOverrideRule& rule : it->second)
+	{
+		BSAnimGroupSequence* cafSeq =
+			FindCAFSequenceForGroup(group, rule);
+
+		if (cafSeq)
+		{
+			if (g_cafDebug)
+			{
+				_MESSAGE(
+					"CAF: SINGLE ctor replace group %u\n  %s\n  -> %s",
+					group,
+					source->filePath,
+					cafSeq->filePath
+				);
+			}
+
+			seq->Anim = cafSeq;
+			break;
+		}
+	}
 }
+
 
 __declspec(naked) void NewAnimSequenceSingleHook()
 {
+	__asm
+	{
+		// eax = AnimSequenceSingle*
+		// esi = BSAnimGroupSequence* source
 
-	__asm {
+		// --- original constructor tail ---
 		mov[eax + 0x8], esi
 		mov[eax + 0x4], esi
-		push	eax
-		mov     dword ptr[eax], 0x00A3C72C
-		jmp		Jumpers::NewAnimSequenceSingle::Return
-	}
+		push eax
+		mov dword ptr[eax], 0x00A3C72C
 
+		// --- CAF injection ---
+		push esi        // source
+		push eax        // this
+		call CAF_NewAnimSequenceSingle_PostCtor
+		add esp, 8
+
+		// --- return to engine ---
+		jmp Jumpers::NewAnimSequenceSingle::Return
+	}
 }
+
 
 __declspec(naked) void RemoveSequenceHook()
 {
@@ -370,11 +873,9 @@ __declspec(naked) void RemoveSequenceHook()
 
 void* CreateTrampoline(uintptr_t src, size_t patchSize)
 {
-    // patchSize MUST be >= 5 and MUST align to instruction boundaries
     if (patchSize < 5)
         return nullptr;
 
-    // Allocate executable memory
     uint8_t* tramp = (uint8_t*)VirtualAlloc(
         nullptr,
         patchSize + 5,
@@ -385,14 +886,12 @@ void* CreateTrampoline(uintptr_t src, size_t patchSize)
     if (!tramp)
         return nullptr;
 
-    // Copy overwritten bytes
     memcpy(tramp, (void*)src, patchSize);
 
-    // Write jump back to original code after overwritten bytes
     uintptr_t srcEnd = src + patchSize;
     uintptr_t trampEnd = (uintptr_t)(tramp + patchSize);
 
-    tramp[patchSize] = 0xE9; // JMP rel32
+    tramp[patchSize] = 0xE9;
     *(int32_t*)(tramp + patchSize + 1) =
         (int32_t)(srcEnd - (trampEnd + 5));
 
@@ -419,12 +918,218 @@ void InstallHook(uintptr_t addr, void* hook, size_t patchSize)
     VirtualProtect((void*)addr, patchSize, old, &old);
 }
 
+
+static thread_local int g_loadAnimDepth = 0;
+
+using Actor_LoadAnimGroup_t =
+signed __int16(__thiscall*)(
+	Actor*,
+	int,
+	int,
+	char
+	);
+
+Actor_LoadAnimGroup_t g_originalLoadAnimGroup = nullptr;
+
+signed __int16 __fastcall ActorLoadAnimGroupHook(
+	Actor* actor,
+	void*,
+	int animGroup,
+	int a3,
+	char a4
+)
+{
+	g_inLoadAnimGroup = true;
+	g_currentAnimActor = actor;
+
+	ActorAnimData* animData = actor->GetAnimData();
+
+	g_loadAnimDepth++;
+
+	if (animData && g_loadAnimDepth == 1)
+	{
+		auto& cafData = g_cafAnimData[animData];
+		cafData.entries.clear();
+
+		auto it = g_animOverrideRules.find(animGroup);
+		if (it != g_animOverrideRules.end())
+		{
+			for (const AnimOverrideRule& rule : it->second)
+			{
+				if (!ConditionsPass(rule, actor, animGroup))
+					continue;
+
+				auto cafSeqIt = g_cafSequencesByGroup.find(animGroup);
+				if (cafSeqIt == g_cafSequencesByGroup.end())
+					continue;
+
+				for (CAFSequence& caf : cafSeqIt->second)
+				{
+					if (!caf.seq)
+						continue;
+
+					bool exists = false;
+					for (auto& e : cafData.entries)
+					{
+						if (e.seq == caf.seq)
+						{
+							exists = true;
+							break;
+						}
+					}
+
+					if (!exists)
+					{
+						cafData.entries.push_back({ caf.seq, &rule });
+
+						if (g_cafDebug)
+						{
+							_MESSAGE(
+								"CAF: registered candidate %s for actor %08X",
+								caf.seq->filePath,
+								actor->refID
+							);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	signed __int16 result =
+		g_originalLoadAnimGroup(actor, animGroup, a3, a4);
+
+	g_loadAnimDepth--;
+
+	if (g_loadAnimDepth == 0)
+	{
+		g_inLoadAnimGroup = false;
+		g_currentAnimActor = nullptr;
+	}
+
+	return result;
+}
+
+
+
+
+
 // Credits to lStewieAl
 [[nodiscard]] __declspec(noinline) UInt32 __stdcall DetourVtable(UInt32 addr, UInt32 dst)
 {
     UInt32 originalFunction = *(UInt32*)addr;
     SafeWrite32(addr, dst);
     return originalFunction;
+}
+
+// Hook the KF model loader - IT'S __thiscall, NOT __cdecl!
+typedef int(__thiscall* _LoadKFModel)(void* This, const char* path);
+_LoadKFModel g_originalLoadKFModel = nullptr;
+
+int __fastcall LoadKFModelHook(void* This, UInt32 edx, const char* path)
+{
+	if (!path)
+		return g_originalLoadKFModel(This, path);
+	// Only swap if we have an active actor and group
+	if (g_currentAnimActor && g_currentAnimGroup > 0)
+	{
+		auto ruleIt = g_animOverrideRules.find(g_currentAnimGroup);
+		if (ruleIt != g_animOverrideRules.end())
+		{
+			for (const AnimOverrideRule& rule : ruleIt->second)
+			{
+				if (ConditionsPass(rule, g_currentAnimActor, g_currentAnimGroup))
+				{
+
+					char newPath[MAX_PATH];
+
+					const char* charPos = strstr(path, "Characters\\");
+					if (!charPos)
+						charPos = strstr(path, "characters\\");
+
+					if (charPos)
+					{
+						size_t prefixLen = charPos - path;
+						if (prefixLen < MAX_PATH - 100)
+						{
+							if (prefixLen > 0)
+							{
+								strncpy_s(newPath, MAX_PATH, path, prefixLen);
+								newPath[prefixLen] = '\0';
+							}
+							else
+							{
+								newPath[0] = '\0';
+							}
+
+							// Extract the folder name (e.g. "_Male")
+							const char* folderStart = charPos + 11; // Skip "Characters\"
+							const char* folderEnd = strchr(folderStart, '\\');
+
+							if (folderEnd)
+							{
+								size_t folderLen = folderEnd - folderStart;
+								char folder[64];
+
+								if (folderLen < 64)
+								{
+									strncpy_s(folder, sizeof(folder), folderStart, folderLen);
+									folder[folderLen] = '\0';
+
+									// Build: prefix + "Characters\" + folder + "\" + replacementFile
+									strcat_s(newPath, "Characters\\");
+									strcat_s(newPath, folder);
+									strcat_s(newPath, "\\");
+									strcat_s(newPath, rule.replacementFile.c_str());
+
+									if (g_cafDebug)
+										_MESSAGE("CAF: Swapping! %s -> %s", path, newPath);
+
+									// Load the replacement animation
+									//return g_originalLoadKFModel(This, newPath);
+								}
+							}
+						}
+					}
+
+					// Only use first matching override
+					break;
+				}
+			}
+		}
+	}
+
+	// Load original file
+	return g_originalLoadKFModel(This, path);
+}
+
+// Install hook
+void InstallLoadKFModelHook()
+{
+	UInt32 hookAddr = 0x00439FF0;
+
+	// Allocate executable trampoline
+	static UInt8 trampoline[32];
+
+	// Make trampoline executable
+	DWORD oldProtect;
+	VirtualProtect(trampoline, sizeof(trampoline), PAGE_EXECUTE_READWRITE, &oldProtect);
+
+	// Copy original bytes
+	memcpy(trampoline, (void*)hookAddr, 7);
+
+	// Add jump back to original function
+	UInt32 returnAddr = hookAddr + 7;
+	trampoline[7] = 0xE9; // JMP opcode
+	*(UInt32*)(trampoline + 8) = returnAddr - ((UInt32)trampoline + 12);
+
+	// Set function pointer
+	g_originalLoadKFModel = (_LoadKFModel)(void*)trampoline;
+
+	// Install hook at original location
+	WriteRelJump(hookAddr, (UInt32)LoadKFModelHook);
+
+	_MESSAGE("CAF: Installed LoadKFModel hook at 0x%08X", hookAddr);
 }
 
 void Install()
@@ -453,8 +1158,6 @@ void Install()
 		0x00AD49A4,
 		(UInt32)&AddAnimationHook
 	);
-
-
 
 	constexpr uintptr_t kNewActorAnimDataAddr = 0x473EB0;
 	size_t kPatchSize = 20;
@@ -486,7 +1189,18 @@ void Install()
 
 	WriteRelCall(0x4741D9, (UInt32)&NewAnimSequenceMultipleHook);
 
-	WriteRelCall(0x436DCD, (UInt32)&LoadAnimGroupHook);
+	g_originalLoadAnimGroup =
+		(Actor_LoadAnimGroup_t)CreateTrampoline(
+			0x005E5690,
+			7
+		);
+
+	WriteRelJump(
+		0x005E5690,
+		(UInt32)ActorLoadAnimGroupHook
+	);
+
+	InstallLoadKFModelHook();
 
     _MESSAGE("CAF: All hooks installed");
 }

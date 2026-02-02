@@ -65,6 +65,28 @@ bool __cdecl ConditionsPass(
     return true;
 }
 
+bool ConditionsPassPreActor(
+    const AnimOverrideRule& rule,
+    UInt32 group
+)
+{
+    for (const AnimConditionEntry& cond : rule.conditions)
+    {
+        if (!cond.fn(nullptr, group, cond.arg.c_str()))
+        {
+            _MESSAGE(
+                "CAF: pre-actor condition failed for group %u (%s)",
+                group,
+                cond.arg.c_str()
+            );
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
 
 void DumpAnimOverrides()
 {
