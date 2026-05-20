@@ -4,11 +4,10 @@
     <ClCompile Include="dllmain.c" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Hooks.cpp" />
-    <ClCompile Include="..\OBSE\obse\obse_common\SafeWrite.cpp" />
     <ClCompile Include="Conditions.cpp" />
     <ClCompile Include="Config.cpp" />
     <ClCompile Include="Core.cpp" />
-    <ClCompile Include="..\OBSE\obse\obse\NiTypes.cpp" />
+    <ClCompile Include="..\xOBSE\obse\obse_common\SafeWrite.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="exports.def" />

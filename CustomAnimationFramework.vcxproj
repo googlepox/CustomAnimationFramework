@@ -60,7 +60,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>C:\Users\brand\Desktop\GameDev\OB\xOBSE\boost_1_86_0;$(SolutionDir);$(SolutionDir)\..;$(SolutionDir)\..\obse\obse\obse;$(SolutionDir)\..\obse\obse\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\brand\Desktop\GameDev\OB\xOBSE\boost_1_86_0;$(SolutionDir);$(SolutionDir)\..;$(SolutionDir)\..\obse\obse\obse;$(SolutionDir)\..\obse\obse\;$(SolutionDir)\..\xobse\obse\obse;$(SolutionDir)..\xobse\obse\obse;$(SolutionDir)\..\xobse\obse;$(SolutionDir)..\xobse\obse;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;OBLIVION_VERSION=0x010201A0;OBLIVION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>false</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
@@ -106,13 +106,12 @@
       <CopyLocalSatelliteAssemblies>true</CopyLocalSatelliteAssemblies>
       <ReferenceOutputAssembly>true</ReferenceOutputAssembly>
     </ProjectReference>
-    <ProjectReference Include="..\OBSE\obse\obse\obse.vcxproj">
+    <ProjectReference Include="..\xOBSE\obse\obse\obse.vcxproj">
       <Project>{01b76b21-f851-436e-acea-64fa03be8c59}</Project>
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\OBSE\obse\obse\NiTypes.cpp" />
-    <ClCompile Include="..\OBSE\obse\obse_common\SafeWrite.cpp" />
+    <ClCompile Include="..\xOBSE\obse\obse_common\SafeWrite.cpp" />
     <ClCompile Include="Conditions.cpp" />
     <ClCompile Include="Config.cpp" />
     <ClCompile Include="Core.cpp" />
