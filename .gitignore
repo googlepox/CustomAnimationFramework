@@ -362,3 +362,20 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 /.github
+/CAFAssetDB.cpp
+/CAFAssetDB.h
+/CAFContext.h
+/CAFLoader.cpp
+/CAFLoader.h
+/CAFPlan.h
+/CAFPlanner.h
+/CAFResolver.cpp
+/CAFResolver.h
+/CAFStore.cpp
+/CAFStore.h
+/CAFTypes.h
+/AnimationHooks.cpp
+/LoadHooks.cpp
+/SequenceHooks.cpp
+/Trampoline.cpp
+/Trampoline.h
