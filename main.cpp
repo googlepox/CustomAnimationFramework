@@ -42,8 +42,8 @@ void MessageHandler(OBSEMessagingInterface::Message* msg)
 {
 	switch (msg->type)
 	{
-	case OBSEMessagingInterface::kMessage_PostLoadGame:
-		Install();;
+	case OBSEMessagingInterface::kMessage_GameInitialized:
+		Install();
 	default:
 		break;
 	}
@@ -102,7 +102,7 @@ extern "C" {
 
 		RegisterConditions();
 		LoadCAFInis();
-
+		//Install();
 		return true;
 	}
 

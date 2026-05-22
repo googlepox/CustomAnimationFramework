@@ -146,45 +146,61 @@ bool EditorIDContains(Actor* actor, UInt32, const char* arg)
 {
     if (!actor || !arg)
         return false;
+
     auto items = actor->GetEquippedItems();
-    for (int i = 0; i < items.size(); i++)
+
+    for (size_t i = 0; i < items.size(); i++)
     {
         TESForm* eq = items.at(i);
-
         if (!eq)
             continue;
+
         TESObjectWEAP* weap = OBLIVION_CAST(eq, TESForm, TESObjectWEAP);
-        if (weap)
+        if (!weap)
+            continue;
+
+        const char* editorID = weap->GetEditorName();
+
+        if (!editorID)
+            continue;
+
+        const char* p = arg;
+
+        while (*p)
         {
-            const char* editorID = weap->GetEditorName();
-            if (!editorID)
-                return false;
+            const char* next = strchr(p, '|');
+            size_t len = next ? (size_t)(next - p) : strlen(p);
 
-            const char* p = arg;
-            while (*p)
+            char token[256];
+            if (len >= sizeof(token))
+                len = sizeof(token) - 1;
+
+            memcpy(token, p, len);
+            token[len] = '\0';
+
+            auto icontains = [](const char* a, const char* b) -> bool {
+                if (!a || !b) return false;
+
+                std::string A(a), B(b);
+
+                std::transform(A.begin(), A.end(), A.begin(),
+                    [](unsigned char c) { return std::tolower(c); });
+
+                std::transform(B.begin(), B.end(), B.begin(),
+                    [](unsigned char c) { return std::tolower(c); });
+
+                return A.find(B) != std::string::npos;
+                };
+
+            if (icontains(editorID, token))
             {
-                const char* next = strchr(p, '|');
-                size_t len = next ? (size_t)(next - p) : strlen(p);
-
-                char token[256];
-                if (len >= sizeof(token))
-                    len = sizeof(token) - 1;
-
-                memcpy(token, p, len);
-                token[len] = '\0';
-
-                if (_stricmp(editorID, token) == 0 ||
-                    strstr(editorID, token))
-                {
-                    return true;
-                }
-
-                if (!next)
-                    break;
-
-                p = next + 1;
+                return true;
             }
 
+            if (!next)
+                break;
+
+            p = next + 1;
         }
     }
 

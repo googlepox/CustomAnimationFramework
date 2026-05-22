@@ -17,7 +17,7 @@ void RegisterAnimOverride(
     const std::vector<AnimConditionEntry>& conditions
 )
 {
-    if (group == 0 || replacementFile.empty())
+    if (replacementFile.empty())
         return;
 
     AnimOverrideRule rule{};
@@ -55,10 +55,15 @@ bool __cdecl ConditionsPass(
     for (const AnimConditionEntry& cond : rule.conditions)
     {
         if (!cond.fn)
+        {
             continue;
-        const char* arg =
-            cond.arg.empty() ? nullptr : cond.arg.c_str();
-        if (!cond.fn(actor, group, arg))
+        }
+
+        const char* arg = cond.arg.empty() ? nullptr : cond.arg.c_str();
+
+        bool result = cond.fn(actor, group, arg);
+
+        if (!result)
             return false;
     }
 
@@ -74,11 +79,6 @@ bool ConditionsPassPreActor(
     {
         if (!cond.fn(nullptr, group, cond.arg.c_str()))
         {
-            _MESSAGE(
-                "CAF: pre-actor condition failed for group %u (%s)",
-                group,
-                cond.arg.c_str()
-            );
             return false;
         }
     }

@@ -87,8 +87,6 @@ void LoadCAFInis()
                 continue;
 
             UInt32 group = std::atoi(rawKey);
-            if (!group)
-                continue;
 
             char temp[512];
             std::strncpy(temp, rawVal, sizeof(temp) - 1);
