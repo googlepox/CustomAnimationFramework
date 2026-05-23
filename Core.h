@@ -13,10 +13,8 @@ struct AnimOverrideRule
     std::vector<AnimConditionEntry> conditions;
 };
 
-
 extern std::unordered_map<UInt32, std::vector<AnimOverrideRule>> g_animOverrideRules;
 extern std::unordered_map<UInt32, std::string> g_animFileOverride;
-
 
 void RegisterAnimOverride(
     UInt32 group,
