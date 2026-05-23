@@ -591,68 +591,80 @@ BSAnimGroupSequence* (__thiscall* GetAnimGroupSequenceSingle)(AnimSequenceSingle
 BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(
 	AnimSequenceSingle* This,
 	void*,
-	int index
-)
+	int index)
 {
-	BSAnimGroupSequence* base =
-		(BSAnimGroupSequence*)ThisStdCall(g_originalGetSingle, This, index);
+	if (!This)
+		return nullptr;
 
-	if (!base || !base->animGroup) return base;
+	BSAnimGroupSequence* originalAnim = This->Anim;
 
-	UInt32 group = base->animGroup->animGroup;
+	if (!originalAnim || !originalAnim->animGroup)
+	{
+		return (BSAnimGroupSequence*)ThisStdCall(
+			g_originalGetSingle,
+			This,
+			index);
+	}
+
+	UInt32 group = originalAnim->animGroup->animGroup;
+
+	// Group 0 is unsafe
+	if (group == 0)
+	{
+		return (BSAnimGroupSequence*)ThisStdCall(
+			g_originalGetSingle,
+			This,
+			index);
+	}
 
 	Actor* actor = g_currentAnimActor;
 	if (!actor)
 	{
-		for (auto& [animData, candidate] : g_animDataToActor)
-		{
-			if (!animData || !candidate) continue;
-			for (int i = 0; i < 5; i++)
-			{
-				BSAnimGroupSequence* slot =
-					(BSAnimGroupSequence*)animData->animSequences[i];
-				if (slot == base)
-				{
-					actor = candidate;
-					goto found;
-				}
-			}
-		}
-	found:;
+		return (BSAnimGroupSequence*)ThisStdCall(
+			g_originalGetSingle,
+			This,
+			index);
 	}
-
-	if (!actor) return base;
 
 	auto cafIt = g_cafSequencesByGroup.find(group);
-	if (cafIt == g_cafSequencesByGroup.end()) return base;
-
-	BSAnimGroupSequence* cafSeq = cafIt->second[0].seq;
-	const AnimOverrideRule* rule = cafIt->second[0].rule;
-	if (!cafSeq || !rule) return base;
-
-	bool condPass = ConditionsPass(*rule, actor, group);
-
-	if (condPass)
+	if (cafIt == g_cafSequencesByGroup.end())
 	{
-		// Save vanilla once
-		if (!g_vanillaSingleAnims.count(This))
-			g_vanillaSingleAnims[This] = This->Anim;
+		return (BSAnimGroupSequence*)ThisStdCall(
+			g_originalGetSingle,
+			This,
+			index);
+	}
 
-		This->Anim = cafSeq;
-		return cafSeq;
-	}
-	else
+	for (const CAFSequence& caf : cafIt->second)
 	{
-		// Restore vanilla if we have it
-		auto vanillaIt = g_vanillaSingleAnims.find(This);
-		if (vanillaIt != g_vanillaSingleAnims.end())
-		{
-			This->Anim = vanillaIt->second;
-			g_vanillaSingleAnims.erase(vanillaIt);
-			return vanillaIt->second;
-		}
-		return base;
+		if (!caf.seq || !caf.rule)
+			continue;
+
+		if (!caf.seq->animGroup)
+			continue;
+
+		if (!ConditionsPass(*caf.rule, actor, group))
+			continue;
+
+		// TEMPORARY swap only
+		This->Anim = caf.seq;
+
+		BSAnimGroupSequence* result =
+			(BSAnimGroupSequence*)ThisStdCall(
+				g_originalGetSingle,
+				This,
+				index);
+
+		// ALWAYS restore immediately
+		This->Anim = originalAnim;
+
+		return result;
 	}
+
+	return (BSAnimGroupSequence*)ThisStdCall(
+		g_originalGetSingle,
+		This,
+		index);
 }
 
 
@@ -1292,10 +1304,10 @@ void Install()
 		(UInt32)&GetAnimGroupSequenceMultipleHook
 	);
 
-	//g_originalGetSingle = DetourVtable(
-		//0x00A3C73C,
-		//(UInt32)&GetAnimGroupSequenceSingleHook
-	//);
+	g_originalGetSingle = DetourVtable(
+		0x00A3C73C,
+		(UInt32)&GetAnimGroupSequenceSingleHook
+	);
 
 	Install65D790Hook();
 
