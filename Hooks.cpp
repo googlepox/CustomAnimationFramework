@@ -450,13 +450,10 @@ static bool g_cafNeedsReregistration = false;
 static std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_vanillaSingleAnims;
 
 
-static bool g_cafRegistered = false;
-
 ActorAnimData* (__thiscall* DisposeActorAnimData)(ActorAnimData*) = (ActorAnimData * (__thiscall*)(ActorAnimData*))0x475B60;
 ActorAnimData* __fastcall DisposeActorAnimDataHook(ActorAnimData* This, UInt32 edx)
 {
 	g_animDataToActor.erase(This);
-	g_cafRegistered = false;
 	return DisposeActorAnimData(This);
 }
 
@@ -612,7 +609,9 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(
 			if (!animData || !candidate) continue;
 			for (int i = 0; i < 5; i++)
 			{
-				if ((BSAnimGroupSequence*)animData->animSequences[i] == base)
+				BSAnimGroupSequence* slot =
+					(BSAnimGroupSequence*)animData->animSequences[i];
+				if (slot == base)
 				{
 					actor = candidate;
 					goto found;
@@ -631,10 +630,29 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(
 	const AnimOverrideRule* rule = cafIt->second[0].rule;
 	if (!cafSeq || !rule) return base;
 
-	if (ConditionsPass(*rule, actor, group))
-		return cafSeq;
+	bool condPass = ConditionsPass(*rule, actor, group);
 
-	return base;
+	if (condPass)
+	{
+		// Save vanilla once
+		if (!g_vanillaSingleAnims.count(This))
+			g_vanillaSingleAnims[This] = This->Anim;
+
+		This->Anim = cafSeq;
+		return cafSeq;
+	}
+	else
+	{
+		// Restore vanilla if we have it
+		auto vanillaIt = g_vanillaSingleAnims.find(This);
+		if (vanillaIt != g_vanillaSingleAnims.end())
+		{
+			This->Anim = vanillaIt->second;
+			g_vanillaSingleAnims.erase(vanillaIt);
+			return vanillaIt->second;
+		}
+		return base;
+	}
 }
 
 
@@ -979,36 +997,70 @@ signed __int16(__thiscall*)(
 Actor_LoadAnimGroup_t g_originalLoadAnimGroup = nullptr;
 
 signed __int16 __fastcall ActorLoadAnimGroupHook(
-	Actor* actor, void*, int animGroup, int a3, char a4)
+	Actor* actor,
+	void*,
+	int animGroup,
+	int a3,
+	char a4
+)
 {
 	g_inLoadAnimGroup = true;
 	g_currentAnimActor = actor;
 	g_currentAnimGroup = animGroup;
+	g_currentActorRefID = actor->refID;
 
 	ActorAnimData* animData = actor->GetAnimData();
+
 	if (animData)
 		g_animDataToActor[animData] = actor;
 
 	g_loadAnimDepth++;
 
-	signed __int16 result = g_originalLoadAnimGroup(actor, animGroup, a3, a4);
-
-	if (!g_cafRegistered && animData)
+	if (animData && g_loadAnimDepth == 1)
 	{
-		void* mgr = *(void**)((char*)animData + 0x98);
-		if (mgr)
-		{
-			for (auto& [group, cafVec] : g_cafSequencesByGroup)
-				for (CAFSequence& caf : cafVec)
-					if (caf.seq)
-						g_addSequence(mgr, caf.seq, 0, 1);
+		auto& cafData = g_cafAnimData[g_currentActorRefID];
+		cafData.entries.clear();
 
-			g_cafRegistered = true;
-			_MESSAGE("CAF: registered all sequences with manager=%p", mgr);
+		auto it = g_animOverrideRules.find(animGroup);
+		if (it != g_animOverrideRules.end())
+		{
+			for (const AnimOverrideRule& rule : it->second)
+			{
+				if (!ConditionsPass(rule, actor, animGroup))
+					continue;
+
+				BSAnimGroupSequence* cafSeq =
+					FindCAFSequenceForGroup(animGroup, rule);
+
+				if (!cafSeq)
+					continue;
+
+				CAFAnimEntry entry;
+				entry.seq = cafSeq;
+				entry.rule = &rule;
+
+				void* mgr = *(void**)((char*)animData + 0x98);
+				if (mgr)
+				{
+					for (auto& [group, cafVec] : g_cafSequencesByGroup)
+					{
+						for (CAFSequence& caf : cafVec)
+						{
+							if (!caf.seq) continue;
+							g_addSequence(mgr, caf.seq, 0, 1);
+						}
+					}
+					g_cafNeedsReregistration = false;
+				}
+			}
 		}
 	}
 
+	signed __int16 result =
+		g_originalLoadAnimGroup(actor, animGroup, a3, a4);
+
 	g_loadAnimDepth--;
+
 	if (g_loadAnimDepth == 0)
 	{
 		g_inLoadAnimGroup = false;
@@ -1240,10 +1292,10 @@ void Install()
 		(UInt32)&GetAnimGroupSequenceMultipleHook
 	);
 
-	g_originalGetSingle = DetourVtable(
-		0x00A3C73C,
-		(UInt32)&GetAnimGroupSequenceSingleHook
-	);
+	//g_originalGetSingle = DetourVtable(
+		//0x00A3C73C,
+		//(UInt32)&GetAnimGroupSequenceSingleHook
+	//);
 
 	Install65D790Hook();
 
@@ -1255,7 +1307,6 @@ void Install()
 	WriteRelJump(0x005E5690, (UInt32)ActorLoadAnimGroupHook);
 
 	InstallSingleDtorHook();
-	InstallDisposeActorAnimDataHook();
 
 	InstallLoadKFModelHook();
 	PreloadCAFSequences();
