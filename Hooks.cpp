@@ -16,6 +16,8 @@
 #include <utility.h>
 #include <GameTasks.h>
 
+#include "MinHook/include/MinHook.h"
+
 #define AnimString "_CAF"
 
 bool g_cafDebug = true;
@@ -32,214 +34,35 @@ static std::unordered_map<ActorAnimData*, Actor*> g_animDataToActor;
 
 static std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_activeCafAnims;
 
+std::unordered_map<NiControllerManager*, Actor*> g_managerToActorMap;
+
+static thread_local int g_loadAnimDepth = 0;
+
 struct CAFSequence
 {
 	BSAnimGroupSequence* seq;          // the CAF animation sequence
 	const AnimOverrideRule* rule;      // rule that owns it
+	bool firstPerson;
 };
 
-static std::unordered_map<
-	UInt32,                            // animGroup
+std::unordered_map<
+	UInt32,
 	std::vector<CAFSequence>
-> g_cafSequencesByGroup;
+> g_cafSequencesByGroupFP;
 
-
-
-class Jumpers
-{
-public:
-	struct CreateDevice
-	{
-		static const UInt32 Hook = 0x0076A542;
-		static const UInt32 Return = 0x0076A547;
-	};
-	struct SetRegionEditorName
-	{
-		static const UInt32 Hook = 0x004A32A6;
-		static const UInt32 Return = 0x004A33A6;
-	};
-	struct SetWeatherEditorName
-	{
-		static const UInt32 Hook = 0x004EE04E;
-		static const UInt32 Return = 0x004EE0EA;
-	};
-	struct SkipFogPass
-	{
-		static const UInt32 Hook = 0x007AE6F5;
-		static const UInt32 Return = 0x007AE6FB;
-	};
-	struct DetectorWindow
-	{
-		static const UInt32 CreateTreeViewHook = 0x00495E1F;
-		static const UInt32 CreateTreeViewReturn = 0x00495E27;
-		static const UInt32 DumpAttributesHook = 0x004967C7;
-		static const UInt32 DumpAttributesReturn = 0x004967CD;
-		static const UInt32 ConsoleCommandHook = 0x0040CC6C;
-		static const UInt32 ConsoleCommandReturn = 0x0040CC73;
-		static const UInt32 SetNodeName = 0x0049658E;
-	};
-	struct RenderInterface
-	{
-		static const UInt32 Hook = 0x0057F3F3;
-		static const UInt32 Return = 0x0057F3F8;
-		static const UInt32 Method = 0x0070E0A0;
-	};
-	struct HitEvent
-	{
-		static const UInt32 Hook = 0x005FF613;
-		static const UInt32 Return = 0x005FF618;
-	};
-	struct NewAnimSequenceSingle
-	{
-		static const UInt32 Hook = 0x0047414D;
-		static const UInt32 Return = 0x00474157;
-	};
-	struct RemoveSequence
-	{
-		static const UInt32 Hook = 0x004742B7;
-		static const UInt32 Return1 = 0x004742BF;
-		static const UInt32 Return2 = 0x004742CD;
-	};
-	struct Shadows
-	{
-		static const UInt32 RenderShadowMapHook = 0x0040C919;
-		static const UInt32 RenderShadowMapReturn = 0x0040C920;
-		static const UInt32 OriginalRenderShadowPass = 0x004073D0;
-		static const UInt32 AddCastShadowFlagHook = 0x004B1A25;
-		static const UInt32 AddCastShadowFlagReturn = 0x004B1A2A;
-		static const UInt32 EditorCastShadowFlagHook = 0x005498DD;
-		static const UInt32 EditorCastShadowFlagReturn = 0x005498E3;
-	};
-	struct WaterHeightMap
-	{
-		static const UInt32 Hook = 0x0049D9FA;
-		static const UInt32 Return = 0x0049D9FF;
-	};
-	struct EndProcess
-	{
-		static const UInt32 Hook = 0x0040F488;
-	};
-	struct Occlusion
-	{
-		static const UInt32 New1CollisionObjectHook = 0x00564529;
-		static const UInt32 New1CollisionObjectReturn = 0x0056452E;
-		static const UInt32 New2CollisionObjectHook = 0x0089E989;
-		static const UInt32 New2CollisionObjectReturn = 0x0089E98E;
-		static const UInt32 New3CollisionObjectHook = 0x0089EA1C;
-		static const UInt32 New3CollisionObjectReturn = 0x0089EA21;
-		static const UInt32 DisposeCollisionObjectHook = 0x00532DD1;
-		static const UInt32 DisposeCollisionObjectReturn = 0x00532DD8;
-		static const UInt32 MaterialPropertyHook = 0x0089F7C6;
-		static const UInt32 MaterialPropertyReturn1 = 0x0089F7CE;
-		static const UInt32 MaterialPropertyReturn2 = 0x0089F8A0;
-		static const UInt32 CoordinateJackHook = 0x008A3101;
-		static const UInt32 CoordinateJackReturn1 = 0x008A3107;
-		static const UInt32 CoordinateJackReturn2 = 0x008A3165;
-		static const UInt32 ObjectCullHook = 0x007073D6;
-		static const UInt32 ObjectCullReturn1 = 0x007073DC;
-		static const UInt32 ObjectCullReturn2 = 0x007073E7;
-	};
-	struct Camera
-	{
-		static const UInt32 UpdateCameraHook = 0x0066BE6E;
-		static const UInt32 UpdateCameraReturn = 0x0066BE7C;
-		static const UInt32 SwitchCameraHook = 0x00671AC9;
-		static const UInt32 SwitchCameraReturn = 0x00671AD0;
-		static const UInt32 SwitchCameraPOVHook = 0x00672FDA;
-		static const UInt32 SwitchCameraPOVReturn = 0x00672FE2;
-		static const UInt32 HeadTrackingHook = 0x0055D6A8;
-		static const UInt32 HeadTrackingReturn = 0x0055D6B5;
-		static const UInt32 HeadTrackingReturn1 = 0x0055D7E6;
-		static const UInt32 SpineTrackingHook = 0x00603C55;
-		static const UInt32 SpineTrackingReturn = 0x00603C5E;
-		static const UInt32 SpineTrackingReturn1 = 0x00603C95;
-		static const UInt32 SetReticleOffsetHook = 0x00580796;
-		static const UInt32 SetReticleOffsetReturn = 0x0058079C;
-	};
-	struct UpdateGrass
-	{
-		static const UInt32 Hook = 0x004EBF87;
-		static const UInt32 Return = 0x004EC4E8;
-	};
-	struct Memory
-	{
-		static const UInt32 MemReallocHook = 0x00401E66;
-		static const UInt32 MemReallocReturn = 0x00401EC7;
-		static const UInt32 CreateTextureFromFileInMemory = 0x007610D3;
-	};
-	struct Equipment
-	{
-		static const UInt32 PrnHook = 0x0047927B;
-		static const UInt32 PrnReturn = 0x0047928A;
-		static const UInt32 MenuMouseButtonHook = 0x0058251B;
-		static const UInt32 MenuMouseButtonReturn1 = 0x00582525;
-		static const UInt32 MenuMouseButtonReturn2 = 0x0058264F;
-		static const UInt32 UnequipTorchHook = 0x0048A7AD;
-		static const UInt32 UnequipTorchReturn = 0x0048A7B5;
-		static const UInt32 EquipItemWornHook = 0x00489E0A;
-		static const UInt32 EquipItemWornReturn = 0x00489E13;
-		static const UInt32 SetWeaponRotationPositionHook = 0x006563F3;
-		static const UInt32 SetWeaponRotationPositionReturn = 0x006563FC;
-	};
-	struct Mounted
-	{
-		static const UInt32 PlayerReadyWeaponHook = 0x00671E37;
-		static const UInt32 ActorReadyWeaponHook = 0x005FDA4F;
-		static const UInt32 ActorReadyWeaponSittingHook = 0x005FD904;
-		static const UInt32 ActorReadyWeaponSittingReturn = 0x005FD910;
-		static const UInt32 PlayerAttackHook = 0x00672612;
-		static const UInt32 PlayerAttackReturn = 0x0067261F;
-		static const UInt32 HittingMountedCreatureHook = 0x005FF017;
-		static const UInt32 HittingMountedCreatureReturn = 0x005FF01C;
-		static const UInt32 BowEquipHook = 0x004E1AC4;
-		static const UInt32 BowEquipReturn = 0x004E1AC9;
-		static const UInt32 AnimControllerHook = 0x004732F4;
-		static const UInt32 AnimControllerReturn1 = 0x004732FA;
-		static const UInt32 AnimControllerReturn2 = 0x00473314;
-		static const UInt32 HorsePaletteHook = 0x007165B9;
-		static const UInt32 HorsePaletteReturn1 = 0x007165C2;
-		static const UInt32 HorsePaletteReturn2 = 0x0071661B;
-		static const UInt32 BowUnequipHook = 0x005F34AB;
-		static const UInt32 BowUnequipReturn = 0x005F34B0;
-		static const UInt32 HideWeaponHook = 0x00654DC8;
-		static const UInt32 HideWeaponReturn = 0x00654E5F;
-	};
-	struct Dodge
-	{
-		static const UInt32 JumpPressedHook = 0x00672A79;
-		static const UInt32 JumpPressedReturn1 = 0x00672A80;
-		static const UInt32 JumpPressedReturn2 = 0x00672B94;
-		static const UInt32 DoubleTapHook = 0x006729DA;
-		static const UInt32 DoubleTapReturn = 0x006729EA;
-	};
-	struct FlyCam
-	{
-		static const UInt32 UpdateForwardFlyCamHook = 0x0066446C;
-		static const UInt32 UpdateForwardFlyCamReturn = 0x0066447A;
-		static const UInt32 UpdateBackwardFlyCamHook = 0x00664489;
-		static const UInt32 UpdateBackwardFlyCamReturn = 0x00664497;
-		static const UInt32 UpdateRightFlyCamHook = 0x006644A6;
-		static const UInt32 UpdateRightFlyCamReturn = 0x006644B4;
-		static const UInt32 UpdateLeftFlyCamHook = 0x006644C3;
-		static const UInt32 UpdateLeftFlyCamReturn = 0x006644D1;
-	};
-	struct UpdateTimeInfo
-	{
-		static const UInt32 Hook = 0x0040D8AB;
-		static const UInt32 Return = 0x0040D8B0;
-	};
-};
+std::unordered_map<
+	UInt32,
+	std::vector<CAFSequence>
+> g_cafSequencesByGroupTP;
 
 thread_local bool g_inLoadAnimGroup = false;
 thread_local BSAnimGroupSequence* g_pendingCAFSequence = nullptr;
 
-UInt32 g_originalAddSingle;
 UInt32 g_originalAddMultiple;
 UInt32 g_originalGetSingle;
 UInt32 g_originalGetMultiple;
 UInt32 g_originalAddAnimation;
 
-void* g_trampAddSingle = nullptr;
 void* g_trampAddMultiple = nullptr;
 void* g_trampGetSingle = nullptr;
 void* g_trampGetMultiple = nullptr;
@@ -247,6 +70,15 @@ void* g_trampAddAnimation = nullptr;
 
 ActorAnimData* g_currentAnimData = nullptr;
 UInt32 g_currentActorRefID = 0;
+
+
+typedef void(__thiscall* _AddSingle)(
+	AnimSequenceSingle*,
+	BSAnimGroupSequence*
+	);
+
+_AddSingle g_originalAddSingle = nullptr;
+void* g_trampAddSingle = nullptr;
 
 struct CAFCondition
 {
@@ -380,6 +212,22 @@ static void AddCAFAnimGroupSequence(
 	);
 }
 
+void RegisterCAFSequenceFP(BSAnimGroupSequence* seq, UInt32 expectedGroup)
+{
+	auto it = g_animOverrideRules.find(expectedGroup);
+	if (it == g_animOverrideRules.end()) return;
+
+	for (AnimOverrideRule& rule : it->second)
+	{
+		if (AnimStringMatch(seq->filePath, rule.replacementFile.c_str()))
+		{
+			g_cafSequencesByGroupFP[expectedGroup].push_back({ seq, &rule });
+			_MESSAGE("CAF FP: registered group=%u file=%s",
+				expectedGroup, seq->filePath);
+			break;
+		}
+	}
+}
 
 void RegisterCAFSequence(BSAnimGroupSequence* seq)
 {
@@ -418,13 +266,53 @@ void RegisterCAFSequence(BSAnimGroupSequence* seq)
 
 		if (AnimStringMatch(fileName, rule.replacementFile.c_str()))
 		{
-			g_cafSequencesByGroup[group].push_back({ seq, &rule });
+			bool isFPFile = StrContainsI(rule.replacementFile.c_str(), "_1stPerson")
+				|| StrContainsI(fileName, "_1stPerson");
+
+			auto& target = isFPFile
+				? g_cafSequencesByGroupFP[group]
+				: g_cafSequencesByGroupTP[group];
+
+			target.push_back({ seq, &rule, isFPFile });
 			_MESSAGE("CAF REGISTER: MATCH SUCCESS group=%u file=%s",
 				group,
 				fileName ? fileName : "<null>");
 
 			//AddCAFAnimGroupSequence(g_currentActorRefID, seq, rule);
 
+			break;
+		}
+	}
+}
+
+static std::unordered_map<AnimSequenceSingle*, Actor*> g_singleToActor;
+
+void __fastcall AddSingleHook(
+	AnimSequenceSingle* This,
+	void*,
+	BSAnimGroupSequence* anim
+)
+{
+	// IMPORTANT: do NOT touch actor globals here
+
+	// Let engine behave normally first
+	ThisStdCall((UInt32)g_originalAddSingle, This, anim);
+
+	// Only bind if we already know actor from a SAFE source
+	auto it = g_animDataToActor.begin();
+
+	for (; it != g_animDataToActor.end(); ++it)
+	{
+		ActorAnimData* data = it->first;
+		Actor* actor = it->second;
+
+		if (!data || !actor)
+			continue;
+
+		// bind ONLY if this AnimSequenceSingle belongs to this actor's animData
+		if (actor->GetAnimData() == data)
+		{
+			g_singleToActor[This] = actor;
 			break;
 		}
 	}
@@ -452,8 +340,18 @@ ActorAnimData* __fastcall DisposeActorAnimDataHook(ActorAnimData* This, UInt32 e
 {
 	g_animDataToActor.erase(This);
 	g_vanillaSingleAnims.clear();
-	g_cafNeedsReregistration = true;
 	return DisposeActorAnimData(This);
+}
+
+void InstallDisposeActorAnimDataHook()
+{
+	WriteRelCall(0x41E9FB, (UInt32)&DisposeActorAnimDataHook);
+	WriteRelCall(0x429920, (UInt32)&DisposeActorAnimDataHook);
+	WriteRelCall(0x650009, (UInt32)&DisposeActorAnimDataHook);
+	WriteRelCall(0x6520ED, (UInt32)&DisposeActorAnimDataHook);
+	WriteRelCall(0x65F9BE, (UInt32)&DisposeActorAnimDataHook);
+	WriteRelCall(0x66960C, (UInt32)&DisposeActorAnimDataHook);
+	WriteRelCall(0x66B3FB, (UInt32)&DisposeActorAnimDataHook);
 }
 
 bool(__thiscall* AddAnimation)(ActorAnimData*, kfModel*, UInt8) = (bool(__thiscall*)(ActorAnimData*, kfModel*, UInt8))0x474070;
@@ -507,52 +405,34 @@ static std::vector<PendingCAF> g_pendingCAF;
 
 BSAnimGroupSequence* FindCAFSequenceForGroup(
 	UInt32 animGroup,
-	const AnimOverrideRule& rule
+	const AnimOverrideRule& rule,
+	bool firstPerson
 )
 {
+	auto& map = firstPerson
+		? g_cafSequencesByGroupFP
+		: g_cafSequencesByGroupTP;
 
-	auto it = g_cafSequencesByGroup.find(animGroup);
-	if (it == g_cafSequencesByGroup.end())
+	auto it = map.find(animGroup);
+	if (it == map.end())
 		return nullptr;
+
+	BSAnimGroupSequence* fallback = nullptr;
 
 	for (const CAFSequence& caf : it->second)
 	{
-
 		if (!caf.seq || !caf.rule)
 			continue;
 
 		if (!AnimStringMatch(caf.seq->filePath, rule.replacementFile.c_str()))
 			continue;
 
+		// exact match wins immediately
 		return caf.seq;
 	}
 
-	return nullptr;
-}
-
-
-void(__thiscall* AddSingle)(AnimSequenceSingle*, BSAnimGroupSequence*) = (void(__thiscall*)(AnimSequenceSingle*, BSAnimGroupSequence*))0x470BA0;
-void __fastcall AddSingleHook(
-	AnimSequenceSingle* This,
-	void*,
-	BSAnimGroupSequence* anim
-)
-{
-	_MESSAGE("AddSingleHook HIT");
-	RegisterCAFSequence(anim);
-	if (g_inLoadAnimGroup &&
-		g_pendingCAFSequence &&
-		anim &&
-		anim->animGroup &&
-		anim->animGroup->animGroup == g_currentAnimGroup)
-	{
-		anim->filePath = CopyString(g_pendingCAFSequence->filePath);
-
-		if (g_cafDebug)
-			_MESSAGE("CAF: Replaced SINGLE sequence path");
-	}
-
-	ThisStdCall(g_originalAddSingle, This, anim);
+	// optional fallback behavior (important for debugging)
+	return fallback;
 }
 
 
@@ -573,6 +453,36 @@ void __fastcall AddMultipleHook(
 	ThisStdCall(g_originalAddMultiple, This, seq);
 }
 
+void RemoveAnimGroupSequence(AnimSequenceBase* This, BSAnimGroupSequence* seqToRemove)
+{
+	// 1. Cast to the manager's sequence array
+	// Assuming the NiTArray is at offset 0x3C
+	NiTArray<BSAnimGroupSequence*>* seqList = (NiTArray<BSAnimGroupSequence*>*)((char*)This + 0x3C);
+
+	for (UInt16 i = 0; i < seqList->numObjs; i++)
+	{
+		if (seqList->data[i] == seqToRemove)
+		{
+			// 2. Perform the shift
+			// Move all subsequent pointers down by 1 to fill the hole
+			for (UInt16 j = i; j < seqList->numObjs - 1; j++)
+			{
+				seqList->data[j] = seqList->data[j + 1];
+			}
+
+			// 3. Decrement the count
+			seqList->numObjs--;
+			seqList->data[seqList->numObjs] = nullptr; // Null the tail
+			break;
+		}
+	}
+}
+
+
+
+typedef bool(__thiscall* _NiTMapGetAt)(void* map, UInt16 key, void** outVal);
+static _NiTMapGetAt g_animsMapGetAt = (_NiTMapGetAt)0x00470960;
+
 static std::unordered_set<BSAnimGroupSequence*> g_registeredWithManager;
 
 // Force the controller manager to update its sequence cache
@@ -580,115 +490,111 @@ typedef void(__thiscall* _UpdateSequence)(NiControllerManager* mgr, NiController
 _UpdateSequence UpdateSeq = (_UpdateSequence)0x006C7A20; // Verify this address in your binary
 
 BSAnimGroupSequence* (__thiscall* GetAnimGroupSequenceSingle)(AnimSequenceSingle*, int) = (BSAnimGroupSequence * (__thiscall*)(AnimSequenceSingle*, int))0x00471710;
+// Global tracking
+std::map<UInt32, bool> g_actorRegistrationState;
+
+// Track the LAST sequence object we registered for this actor
+std::unordered_set<AnimSequenceSingle*> g_registeredSingles;
+
+std::unordered_map<NiControllerManager*, Actor*> g_managerActorCache;
+
+bool IsFirstPersonContext(Actor* actor, AnimSequenceSingle* seq)
+{
+	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
+	if (!pc || !g_thePlayer || pc != *g_thePlayer) return false;
+	return pc->isThirdPerson == 0;
+}
+
+typedef void(__thiscall* sub_474510_t)(ActorAnimData* animData, TESObjectREFR* a2);
+sub_474510_t Original_sub_474510 = nullptr;
+
+void __fastcall sub_474510_Detour(ActorAnimData* animData, void* edx, TESObjectREFR* a2)
+{
+	_MESSAGE("HOOK HIT");
+	// A2 is the Actor, 'This' is the AnimData. 
+	// This is the point of truth for the link.
+	if (a2 && animData->manager)
+	{
+		_MESSAGE("Inserting actor %08X", a2->refID);
+		g_managerActorCache[animData->manager] = (Actor*)a2;
+	}
+
+	// Call the original to ensure the engine initializes the AnimData properly
+	Original_sub_474510(animData, a2);
+}
+
+void InstallSub_474510_Detour()
+{
+	if (MH_CreateHook((LPVOID)0x00474510, (LPVOID)&sub_474510_Detour, (LPVOID*)&Original_sub_474510) == MH_OK)
+	{
+		MH_EnableHook((LPVOID)0x00474510);
+	}
+}
+
 BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingle* This, void*, int index)
 {
-	// 1. Always call the original first to ensure the engine initializes its own memory
 	BSAnimGroupSequence* base = (BSAnimGroupSequence*)ThisStdCall(g_originalGetSingle, This, index);
 
-	Actor* actor = g_currentAnimActor;
+	if (!This || !This->Anim) return base;
+
+	NiControllerManager* mgr = This->Anim ? This->Anim->controllerMgr : nullptr;
+	if (!mgr) return base;
+
+	Actor* actor = nullptr;
+	auto itActor = g_managerToActorMap.find(mgr);
+	if (itActor != g_managerToActorMap.end())
+	{
+		actor = itActor->second;
+	}
+
 	if (!actor || !InterfaceManager::GetSingleton()->IsGameMode()) return base;
 
-	// 2. Safely access the group ID
-	if (!base || !base->animGroup) return base;
+	UInt32 actorId = actor->refID;
 	UInt32 group = base->animGroup->animGroup;
+	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
 
-	auto it = g_cafSequencesByGroup.find(group);
-	if (it != g_cafSequencesByGroup.end())
+	bool isFP = IsFirstPersonContext(actor, This);
+
+	auto& map = isFP ? g_cafSequencesByGroupFP : g_cafSequencesByGroupTP;
+
+	auto it = map.find(group);
+	if (it == map.end())
 	{
-		for (const CAFSequence& caf : it->second)
+		return base;
+	}
+
+	for (const CAFSequence& caf : it->second)
+	{
+
+		bool pass = ConditionsPass(*caf.rule, actor, group);
+		if (!caf.seq || !caf.rule) continue;
+		if (pass)
 		{
-			if (ConditionsPass(*caf.rule, actor, group))
+			/*if (!g_registeredSingles.contains(This))
 			{
-				// 1. Register the sequence
+				caf.seq->m_uiRefCount++;
 				This->AddAnimGroupSequence(caf.seq);
-
-				// 3. Ensure the controller manager is assigned (you were already doing this)
 				caf.seq->controllerMgr = This->Anim->controllerMgr;
-
-				return caf.seq;
+				g_registeredSingles.insert(This);
+			}*/
+			//base->filePath = caf.seq->filePath;
+			g_addSequence(base->controllerMgr, caf.seq, 0, 1);
+			if (!g_registeredSingles.contains(This))
+			{
+				caf.seq->m_uiRefCount++;
+				//This->AddAnimGroupSequence(caf.seq);
+				//caf.seq->controllerMgr = base->controllerMgr;
+				g_registeredSingles.insert(This);
 			}
-		}
-	}
-
-	return base;
-}
-
-
-bool SequenceContains(AnimSequenceMultiple* sequence, BSAnimGroupSequence* target)
-{
-	if (!sequence || !sequence->Anims || !target)
-		return false;
-
-	for (auto* node = sequence->Anims->start; node; node = node->next)
-	{
-		if (node->data == target)
-			return true;
-	}
-
-	return false;
-}
-
-typedef bool(__thiscall* _NiTMapGetAt)(void* map, UInt16 key, void** outVal);
-static _NiTMapGetAt g_animsMapGetAt = (_NiTMapGetAt)0x00470960;
-
-BSAnimGroupSequence* GetCAFOverride(
-	BSAnimGroupSequence* vanilla,
-	Actor* actor,
-	UInt32 group)
-{
-	auto it = g_cafSequencesByGroup.find(group);
-	if (it == g_cafSequencesByGroup.end())
-		return vanilla;
-
-	for (auto& caf : it->second)
-	{
-		if (!caf.seq || !caf.rule)
-			continue;
-
-		if (ConditionsPass(*caf.rule, actor, group))
-		{
+			_MESSAGE("CAF RETURN: actor=%08X group=%u seq=%p",
+				actor->refID, group, caf.seq);
 			return caf.seq;
 		}
 	}
-
-	return vanilla;
-}
-
-void DumpSequenceMultiple(AnimSequenceMultiple* sequence)
-{
-	if (!sequence || !sequence->Anims)
-	{
-		_MESSAGE("DumpSequenceMultiple: invalid sequence");
-		return;
-	}
-
-	int i = 0;
-
-	for (auto* node = sequence->Anims->start; node; node = node->next, i++)
-	{
-		BSAnimGroupSequence* seq = node->data;
-
-		if (!seq)
-		{
-			_MESSAGE("  [%d] NULL seq", i);
-			continue;
-		}
-
-		const char* file = seq->filePath ? seq->filePath : "<null>";
-		UInt32 group = seq->animGroup ? seq->animGroup->animGroup : 0;
-
-		_MESSAGE("  [%d] seq=%p group=%u file=%s", i, seq, group, file);
-	}
+	return base;
 }
 
 AnimSequenceMultiple* (__thiscall* NewAnimSequenceMultiple)(AnimSequenceMultiple*, AnimSequenceSingle*) = (AnimSequenceMultiple * (__thiscall*)(AnimSequenceMultiple*, AnimSequenceSingle*))0x00473D90;
-
-
-struct SequenceBackup
-{
-	std::vector<BSAnimGroupSequence*> vanilla;
-	bool modified = false;
-};
 
 static std::unordered_map<
 	AnimSequenceMultiple*,
@@ -709,13 +615,30 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 
 	if (!base || !base->animGroup) return base;
 
+
+	NiControllerManager* mgr = base->controllerMgr;
+	Actor* actor = nullptr;
+	auto itActor = g_managerToActorMap.find(mgr);
+	if (itActor != g_managerToActorMap.end())
+	{
+		actor = itActor->second;
+		_MESSAGE("Resolved registration for Actor %08X", actor->refID);
+	}
+
+	if (!actor || !InterfaceManager::GetSingleton()->IsGameMode()) return base;
+
+	_MESSAGE("GetMultiple Actor %08X requesting group %d", actor->refID, index);
+
 	UInt32 group = base->animGroup->animGroup;
 
-	Actor* actor = g_currentAnimActor;
-	if (!actor) return base;
+	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
 
-	auto cafIt = g_cafSequencesByGroup.find(group);
-	if (cafIt == g_cafSequencesByGroup.end()) return base;
+	bool isFP = (pc && pc->firstPersonAnimData == actor->GetAnimData());
+
+	auto& map = isFP ? g_cafSequencesByGroupFP : g_cafSequencesByGroupTP;
+
+	auto cafIt = map.find(group);
+	if (cafIt == map.end()) return base;
 
 	BSAnimGroupSequence* cafSeq = cafIt->second[0].seq;
 	const AnimOverrideRule* rule = cafIt->second[0].rule;
@@ -760,134 +683,6 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 	return condPass ? cafSeq : vanilla;
 }
 
-static std::unordered_map<AnimSequenceSingle*, Actor*> g_singleToActor;
-
-AnimSequenceMultiple* __fastcall NewAnimSequenceMultipleHook(
-	AnimSequenceMultiple* This,
-	UInt32,
-	AnimSequenceSingle* sourceSingle
-)
-{
-	AnimSequenceMultiple* seq = NewAnimSequenceMultiple(This, sourceSingle);
-	if (!seq) return seq;
-
-	// Store actor context while we have it
-	if (g_currentAnimActor)
-	{
-		g_multipleToActor[seq] = g_currentAnimActor;
-		_MESSAGE("CAF[NASM]: bound seq=%p to actor=%08X",
-			seq, g_currentAnimActor->refID);
-	}
-
-	if (g_cafInjectedMultiples.contains(seq)) return seq;
-
-	for (auto& [group, cafVec] : g_cafSequencesByGroup)
-	{
-		for (CAFSequence& caf : cafVec)
-		{
-			if (!caf.seq) continue;
-			seq->AddAnimGroupSequence(caf.seq);
-			_MESSAGE("CAF[NASM]: INJECTED caf.seq=%p group=%u", caf.seq, group);
-		}
-	}
-
-	g_cafInjectedMultiples.insert(seq);
-	return seq;
-}
-
-
-void __stdcall CAF_NewAnimSequenceSingle_PostCtor(
-	AnimSequenceSingle* seq,
-	BSAnimGroupSequence* source
-)
-{
-	_MESSAGE("CAF_NewAnimSequenceSingle_PostCtor");
-	if (!seq || !source || !source->animGroup)
-		return;
-
-	UInt32 group = source->animGroup->animGroup;
-
-	if (g_currentAnimActor)
-	{
-		g_singleToActor[seq] = g_currentAnimActor;
-
-		_MESSAGE("CAF[SINGLE]: bound seq=%p actor=%08X",
-			seq,
-			g_currentAnimActor->refID);
-	}
-
-	auto it = g_animOverrideRules.find(group);
-	if (it == g_animOverrideRules.end())
-		return;
-
-	for (const AnimOverrideRule& rule : it->second)
-	{
-		BSAnimGroupSequence* cafSeq =
-			FindCAFSequenceForGroup(group, rule);
-
-		if (cafSeq)
-		{
-			if (g_cafDebug)
-			{
-				_MESSAGE(
-					"CAF: SINGLE ctor replace group %u\n  %s\n  -> %s",
-					group,
-					source->filePath,
-					cafSeq->filePath
-				);
-			}
-
-			seq->Anim = cafSeq;
-			break;
-		}
-	}
-}
-
-
-__declspec(naked) void NewAnimSequenceSingleHook()
-{
-	__asm
-	{
-		// eax = AnimSequenceSingle*
-		// esi = BSAnimGroupSequence* source
-
-		// --- original constructor tail ---
-		mov[eax + 0x8], esi
-		mov[eax + 0x4], esi
-		push eax
-		mov dword ptr[eax], 0x00A3C72C
-
-		// --- CAF injection ---
-		push esi        // source
-		push eax        // this
-		call CAF_NewAnimSequenceSingle_PostCtor
-		add esp, 8
-
-		// --- return to engine ---
-		jmp Jumpers::NewAnimSequenceSingle::Return
-	}
-}
-
-
-__declspec(naked) void RemoveSequenceHook()
-{
-
-	__asm {
-		mov		ecx, [eax + 0x68]
-		mov		edx, [ecx + 0x0A]
-		test	dl, dl
-		jnz		short skip_removal
-		push	eax
-		lea		ecx, [esp + 0x1C]
-		push	ecx
-		mov		ecx, edi
-		jmp		Jumpers::RemoveSequence::Return1
-
-		skip_removal :
-		jmp		Jumpers::RemoveSequence::Return2
-	}
-
-}
 
 void* CreateTrampoline(uintptr_t src, size_t patchSize)
 {
@@ -941,9 +736,6 @@ void InstallHook(uintptr_t addr, void* hook, size_t patchSize)
 	VirtualProtect((void*)addr, patchSize, old, &old);
 }
 
-
-static thread_local int g_loadAnimDepth = 0;
-
 using Actor_LoadAnimGroup_t =
 signed __int16(__thiscall*)(
 	Actor*,
@@ -972,9 +764,17 @@ signed __int16 __fastcall ActorLoadAnimGroupHook(
 	if (animData)
 		g_animDataToActor[animData] = actor;
 
+	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
+
+	bool isFP = (pc && pc->firstPersonAnimData == actor->GetAnimData());
+
+	auto& map = isFP ? g_cafSequencesByGroupFP : g_cafSequencesByGroupTP;
+
+	auto it = map.find(animGroup);
+
 	g_loadAnimDepth++;
 
-	if (animData && g_loadAnimDepth == 1 && animGroup != 0)
+	if (animData && g_loadAnimDepth == 1)
 	{
 		auto& cafData = g_cafAnimData[g_currentActorRefID];
 		cafData.entries.clear();
@@ -988,7 +788,7 @@ signed __int16 __fastcall ActorLoadAnimGroupHook(
 					continue;
 
 				BSAnimGroupSequence* cafSeq =
-					FindCAFSequenceForGroup(animGroup, rule);
+					FindCAFSequenceForGroup(animGroup, rule, isFP);
 
 				if (!cafSeq)
 					continue;
@@ -1000,7 +800,7 @@ signed __int16 __fastcall ActorLoadAnimGroupHook(
 				void* mgr = *(void**)((char*)animData + 0x98);
 				if (mgr)
 				{
-					for (auto& [group, cafVec] : g_cafSequencesByGroup)
+					for (auto& [group, cafVec] : map)
 					{
 						for (CAFSequence& caf : cafVec)
 						{
@@ -1059,6 +859,18 @@ void InstallSingleDtorHook()
 	WriteRelJump(0x00471760, (UInt32)AnimSequenceSingleDtorHook);
 }
 
+
+void InstallAddSingleHook()
+{
+	g_originalAddSingle =
+		(void(__thiscall*)(AnimSequenceSingle*, BSAnimGroupSequence*))DetourVtable(
+			0x00A3C730, // your AddSingle vtable address
+			(UInt32)&AddSingleHook
+		);
+
+	_MESSAGE("CAF: AddSingleHook installed");
+}
+
 // Credits to lStewieAl
 [[nodiscard]] __declspec(noinline) UInt32 __stdcall DetourVtable(UInt32 addr, UInt32 dst)
 {
@@ -1080,10 +892,10 @@ typedef BSAnimGroupSequence* (__thiscall* _BSAnimGroupSequenceCtor)(
 static _BSAnimGroupSequenceCtor g_BSAnimGroupSequenceCtor =
 (_BSAnimGroupSequenceCtor)0x0049FD90;
 
-void PreloadCAFSequences()
+void PreloadCAFSequencesTP()
 {
 
-	_MESSAGE("CAF PRELOAD: ENTER PreloadCAFSequences()");
+	_MESSAGE("CAF PRELOAD: ENTER PreloadCAFSequencesTP()");
 	_MESSAGE("CAF PRELOAD: g_animOverrideRules groups=%zu",
 		g_animOverrideRules.size());
 
@@ -1159,8 +971,91 @@ void PreloadCAFSequences()
 		}
 	}
 
-	_MESSAGE("CAF: PreloadCAF complete, %zu groups populated",
-		g_cafSequencesByGroup.size());
+	_MESSAGE("CAF: PreloadCAF TP complete, %zu groups populated",
+		g_cafSequencesByGroupTP.size());
+}
+
+void PreloadCAFSequencesFP()
+{
+
+	_MESSAGE("CAF PRELOAD: ENTER PreloadCAFSequencesFP()");
+	_MESSAGE("CAF PRELOAD: g_animOverrideRules groups=%zu",
+		g_animOverrideRules.size());
+
+	void* modelLoader = *(void**)0x00B33A1C;
+	if (!modelLoader)
+	{
+		_MESSAGE("CAF: PreloadCAF — ModelLoader not ready");
+		return;
+	}
+
+	for (auto& [group, rules] : g_animOverrideRules)
+	{
+		_MESSAGE("CAF PRELOAD: group=%u rules=%zu",
+			group,
+			rules.size()
+		);
+
+		for (const AnimOverrideRule& rule : rules)
+		{
+			_MESSAGE("CAF PRELOAD: rule='%s' group=%u",
+				rule.replacementFile.c_str(),
+				group);
+
+			std::string path = "Characters\\_1stPerson\\Male\\" + rule.replacementFile + ".kf";
+
+			g_loadingCAF = true;
+			kfModel* model = (kfModel*)g_originalLoadKFModel(modelLoader, path.c_str());
+			_MESSAGE("CAF PRELOAD: KF LOAD result model=%p path=%s",
+				model,
+				path.c_str());
+
+			g_loadingCAF = false;
+
+			if (!model || !model->animGroup)
+			{
+				_MESSAGE("CAF: PreloadCAF FAILED %s", path.c_str());
+				continue;
+			}
+
+			BSAnimGroupSequence* seq =
+				(BSAnimGroupSequence*)FormHeap_Allocate(0x6C);
+			if (!seq) continue;
+
+			g_BSAnimGroupSequenceCtor(seq, model->animGroup, model->controllerSequence);
+
+			void* src = model->controllerSequence;
+
+			_MESSAGE("CAF PRELOAD: seq created=%p animGroup=%p controller=%p",
+				seq,
+				model->animGroup,
+				model->controllerSequence);
+
+			_MESSAGE("CAF PRELOAD: calling RegisterCAFSequence seq=%p filePath=%s",
+				seq,
+				seq ? seq->filePath : "<null>");
+
+			RegisterCAFSequenceFP(seq, group); // reuses existing matching logic
+			if (seq && seq->filePath)
+			{
+				// Prefix with marker that idle picker won't load
+				std::string fakePath = "_CAF_INTERNAL_" + std::string(seq->filePath);
+				char* newPath = (char*)FormHeap_Allocate(fakePath.size() + 1);
+				strcpy_s(newPath, fakePath.size() + 1, fakePath.c_str());
+				seq->filePath = newPath;
+			}
+
+			_MESSAGE("CAF: PreloadCAF OK group=%u %s", group, path.c_str());
+
+			_MESSAGE("CAF: seq+0x24=%f seq+0x28=%f seq+0x2C=%f",
+				*(float*)((char*)seq + 0x24),
+				*(float*)((char*)seq + 0x28),
+				*(float*)((char*)seq + 0x2C));
+		}
+	}
+
+	_MESSAGE("CAF: PreloadCAF FP complete, %zu groups populated",
+		g_cafSequencesByGroupFP.size());
 }
 
 int __fastcall LoadKFModelHook(void* This, UInt32 edx, const char* path)
@@ -1204,50 +1099,56 @@ inline Actor** GetCurrentAnimActorPtr()
 
 static const UInt32 loc_65D797 = 0x0065D797;
 
+static Actor* s_tempActor = nullptr;
+
+void LogActorProcessAction(Actor* actor)
+{
+	if (!actor)
+		return;
+
+	if (!actor->GetAnimData())
+		return;
+
+	g_managerToActorMap[actor->GetAnimData()->manager] = actor;
+}
+
 __declspec(naked) void Sub65D790Hook()
 {
 	__asm
 	{
+		mov[s_tempActor], ecx      // save actor* before pushad
+
 		pushad
 
-		mov eax, ecx
+		mov eax, [s_tempActor]
 		test eax, eax
 		jz skip
-
-		// basic sanity: must be aligned pointer
 		test eax, 0x3
 		jnz skip
-
 		cmp eax, 0x10000
 		jb skip
-
-		// vtable check (Actor RTTI sanity)
 		mov edx, [eax]
 		test edx, edx
 		jz skip
 
-		// OPTIONAL but highly recommended:
-		// compare against known Actor vtable region
-		// (you already saw PlayerCharacter vtable in logs)
-		cmp edx, 0x00A6E074
-		jne skip
-
 		push eax
+		call LogActorProcessAction
+		add esp, 4
+
+		push[s_tempActor]
 		call GetCurrentAnimActorPtr
-		pop ecx
+		add esp, 4
 		test eax, eax
 		jz skip
-
-		mov[eax], ecx   // safe store
+		mov ecx, [s_tempActor]
+		mov[eax], ecx
 
 		skip :
 		popad
-
 			push ebx
 			mov ebx, [esp + 8]
 			push ebp
 			push esi
-
 			jmp loc_65D797
 	}
 }
@@ -1255,6 +1156,33 @@ __declspec(naked) void Sub65D790Hook()
 void Install65D790Hook()
 {
 	WriteRelJump(0x0065D790, (UInt32)Sub65D790Hook);
+}
+
+typedef void* OriginalFnPtr;
+OriginalFnPtr OriginalActorProcessAction = nullptr;
+
+__declspec(naked) void ActorProcessAction_Detour_Naked()
+{
+	__asm
+	{
+		test ecx, ecx
+		jz skip
+
+		push ecx
+		call LogActorProcessAction
+		add esp, 4
+
+		skip:
+		jmp[OriginalActorProcessAction]
+	}
+}
+
+void InstallActorProcessActionHook()
+{
+	if (MH_CreateHook((LPVOID)0x005FCAB0, (LPVOID)&ActorProcessAction_Detour_Naked, (LPVOID*)&OriginalActorProcessAction) == MH_OK)
+	{
+		MH_EnableHook((LPVOID)0x005FCAB0);
+	}
 }
 
 typedef void(__thiscall* _ModelCacheRelease)(void*, const char*, int);
@@ -1281,13 +1209,22 @@ void InstallSub43E680Hook()
 	);
 }
 
+void InitializeMyHooks()
+{
+	if (MH_Initialize() != MH_OK)
+	{
+		_MESSAGE("CAF: MinHook failed to initialize");
+	}
+}
+
 void Install()
 {
+	InitializeMyHooks();
 
-	g_originalGetMultiple = DetourVtable(
-		0x00A3C768,
-		(UInt32)&GetAnimGroupSequenceMultipleHook
-	);
+	//g_originalGetMultiple = DetourVtable(
+		//0x00A3C768,
+		//(UInt32)&GetAnimGroupSequenceMultipleHook
+	//);
 
 	g_originalGetSingle = DetourVtable(
 		0x00A3C73C,
@@ -1295,20 +1232,24 @@ void Install()
 	);
 
 	Install65D790Hook();
+	InstallActorProcessActionHook();
+	//InstallSub_474510_Detour();
 
 	//WriteRelCall(0x4741D9, (UInt32)&NewAnimSequenceMultipleHook);
 
-	g_originalLoadAnimGroup =
-		(Actor_LoadAnimGroup_t)CreateTrampoline(0x005E5690, 7);
+	//g_originalLoadAnimGroup =
+		//(Actor_LoadAnimGroup_t)CreateTrampoline(0x005E5690, 7);
 
-	WriteRelJump(0x005E5690, (UInt32)ActorLoadAnimGroupHook);
+	//WriteRelJump(0x005E5690, (UInt32)ActorLoadAnimGroupHook);
 
 	//InstallSingleDtorHook();
+	InstallDisposeActorAnimDataHook();
 
-	//InstallSub43E680Hook();
+	//InstallAddSingleHook();
 
 	InstallLoadKFModelHook();
-	PreloadCAFSequences();
+	PreloadCAFSequencesTP();
+	PreloadCAFSequencesFP();
 
 	_MESSAGE("CAF: All hooks installed");
 }

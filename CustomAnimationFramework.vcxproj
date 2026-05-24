@@ -60,7 +60,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>C:\Users\brand\Desktop\GameDev\OB\xOBSE\boost_1_86_0;$(SolutionDir);$(SolutionDir)\..;$(SolutionDir)\..\obse\obse\obse;$(SolutionDir)\..\obse\obse\;$(SolutionDir)\..\xobse\obse\obse;$(SolutionDir)..\xobse\obse\obse;$(SolutionDir)\..\xobse\obse;$(SolutionDir)..\xobse\obse;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\brand\Desktop\GameDev\OB\xOBSE\boost_1_86_0;$(SolutionDir);$(SolutionDir)\..;$(SolutionDir)\..\obse\obse\obse;$(SolutionDir)\..\obse\obse\;$(SolutionDir)\..\xobse\obse\obse;$(SolutionDir)..\xobse\obse\obse;$(SolutionDir)\..\xobse\obse;$(SolutionDir)..\xobse\MinHook;$(SolutionDir)..\xobse\obse;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;OBLIVION_VERSION=0x010201A0;OBLIVION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>false</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
@@ -77,6 +77,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <TargetMachine>MachineX86</TargetMachine>
+      <AdditionalDependencies>libMinHook.x86.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>C:\Users\brand\Desktop\GameDev\OB\xOBSE\MinHook\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
