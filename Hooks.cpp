@@ -657,8 +657,7 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 				//caf.seq->controllerMgr = base->controllerMgr;
 				g_registeredSingles.insert(This);
 			}
-			_MESSAGE("CAF RETURN: actor=%08X group=%u seq=%p filename=%s",
-				actor->refID, group, actorSeq, actorSeq->filePath);
+
 			return actorSeq;
 		}
 	}
@@ -722,17 +721,22 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 		? g_vanillaBySequence[sequence]
 		: base;
 
+	BSAnimGroupSequence* actorSeq = GetOrCreateActorCAFSeq(actor, group, *rule, mgr);
 	bool condPass = ConditionsPass(*rule, actor, group);
+	if (condPass)
+	{
+		g_addSequence(base->controllerMgr, actorSeq, 0, 1);
+	}
 
 	if (sequence->Anims)
 	{
 		for (auto* node = sequence->Anims->start; node; node = node->next)
 		{
-			if (condPass && node->data != cafSeq)
+			if (condPass && node->data != actorSeq)
 			{
 				auto& vec = g_vanillaNodesBySequence[sequence];
 				vec.push_back(node->data);
-				node->data = cafSeq;
+				node->data = actorSeq;
 			}
 			else if (!condPass)
 			{
@@ -751,7 +755,7 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 		}
 	}
 
-	return condPass ? cafSeq : vanilla;
+	return condPass ? actorSeq : vanilla;
 }
 
 
@@ -1275,10 +1279,10 @@ void Install()
 {
 	InitializeMyHooks();
 
-	//g_originalGetMultiple = DetourVtable(
-		//0x00A3C768,
-		//(UInt32)&GetAnimGroupSequenceMultipleHook
-	//);
+	g_originalGetMultiple = DetourVtable(
+		0x00A3C768,
+		(UInt32)&GetAnimGroupSequenceMultipleHook
+	);
 
 	g_originalGetSingle = DetourVtable(
 		0x00A3C73C,
