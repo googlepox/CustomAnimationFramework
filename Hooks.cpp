@@ -80,6 +80,21 @@ typedef void(__thiscall* _AddSingle)(
 _AddSingle g_originalAddSingle = nullptr;
 void* g_trampAddSingle = nullptr;
 
+
+
+// Hook the KF model loader - IT'S __thiscall, NOT __cdecl!
+typedef int(__thiscall* _LoadKFModel)(void* This, const char* path);
+_LoadKFModel g_originalLoadKFModel = nullptr;
+
+typedef BSAnimGroupSequence* (__thiscall* _BSAnimGroupSequenceCtor)(
+	BSAnimGroupSequence*, // this (0x6C bytes)
+	void*,               // BSAnimGroup*   (kfModel+0x08)
+	void*                // NiSequenceData* (kfModel+0x04)
+	);
+
+static _BSAnimGroupSequenceCtor g_BSAnimGroupSequenceCtor =
+(_BSAnimGroupSequenceCtor)0x0049FD90;
+
 struct CAFCondition
 {
 	AnimConditionFn fn;
@@ -531,6 +546,61 @@ void InstallSub_474510_Detour()
 	}
 }
 
+// Per actor+group → their own CAF sequence
+static std::unordered_map<UInt64, BSAnimGroupSequence*> g_actorCAFSeqs;
+
+BSAnimGroupSequence* GetOrCreateActorCAFSeq(
+	Actor* actor, UInt32 group, const AnimOverrideRule& rule,
+	NiControllerManager* mgr)
+{
+	UInt64 key = ((UInt64)actor->refID << 32) | group;
+
+	auto it = g_actorCAFSeqs.find(key);
+	if (it != g_actorCAFSeqs.end())
+		return it->second;
+
+	// Find the template sequence
+	auto cafIt = g_cafSequencesByGroupTP.find(group);
+	if (cafIt == g_cafSequencesByGroupTP.end()) return nullptr;
+	BSAnimGroupSequence* tmpl = cafIt->second[0].seq;
+	if (!tmpl) return nullptr;
+
+	// Clone it
+	void* modelLoader = *(void**)0x00B33A1C;
+	std::string path = "Characters\\_Male\\" + rule.replacementFile + ".kf";
+
+	g_loadingCAF = true;
+	kfModel* model = (kfModel*)g_originalLoadKFModel(modelLoader, path.c_str());
+	g_loadingCAF = false;
+
+	if (!model || !model->animGroup) return nullptr;
+
+	BSAnimGroupSequence* seq =
+		(BSAnimGroupSequence*)FormHeap_Allocate(0x6C);
+	if (!seq) return nullptr;
+
+	//memset(seq, 0, 0x6C);
+	g_BSAnimGroupSequenceCtor(seq, model->animGroup, model->controllerSequence);
+	//seq->controllerMgr = mgr;
+	//seq->m_uiRefCount = 1;
+
+	RegisterCAFSequence(seq); // reuses existing matching logic
+	if (seq && seq->filePath)
+	{
+		// Prefix with marker that idle picker won't load
+		std::string fakePath = "_CAF_INTERNAL_" + std::string(seq->filePath);
+		char* newPath = (char*)FormHeap_Allocate(fakePath.size() + 1);
+		strcpy_s(newPath, fakePath.size() + 1, fakePath.c_str());
+		seq->filePath = newPath;
+	}
+
+	g_actorCAFSeqs[key] = seq;
+	_MESSAGE("CAF: created per-actor seq=%p group=%u actor=%08X",
+		seq, group, actor->refID);
+
+	return seq;
+}
+
 BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingle* This, void*, int index)
 {
 	BSAnimGroupSequence* base = (BSAnimGroupSequence*)ThisStdCall(g_originalGetSingle, This, index);
@@ -570,6 +640,7 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 		if (!caf.seq || !caf.rule) continue;
 		if (pass)
 		{
+			BSAnimGroupSequence* actorSeq = GetOrCreateActorCAFSeq(actor, group, *caf.rule, mgr);
 			/*if (!g_registeredSingles.contains(This))
 			{
 				caf.seq->m_uiRefCount++;
@@ -578,17 +649,17 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 				g_registeredSingles.insert(This);
 			}*/
 			//base->filePath = caf.seq->filePath;
-			g_addSequence(base->controllerMgr, caf.seq, 0, 1);
+			g_addSequence(base->controllerMgr, actorSeq, 0, 1);
 			if (!g_registeredSingles.contains(This))
 			{
-				caf.seq->m_uiRefCount++;
+				actorSeq->m_uiRefCount++;
 				//This->AddAnimGroupSequence(caf.seq);
 				//caf.seq->controllerMgr = base->controllerMgr;
 				g_registeredSingles.insert(This);
 			}
-			_MESSAGE("CAF RETURN: actor=%08X group=%u seq=%p",
-				actor->refID, group, caf.seq);
-			return caf.seq;
+			_MESSAGE("CAF RETURN: actor=%08X group=%u seq=%p filename=%s",
+				actor->refID, group, actorSeq, actorSeq->filePath);
+			return actorSeq;
 		}
 	}
 	return base;
@@ -879,19 +950,6 @@ void InstallAddSingleHook()
 	return originalFunction;
 }
 
-// Hook the KF model loader - IT'S __thiscall, NOT __cdecl!
-typedef int(__thiscall* _LoadKFModel)(void* This, const char* path);
-_LoadKFModel g_originalLoadKFModel = nullptr;
-
-typedef BSAnimGroupSequence* (__thiscall* _BSAnimGroupSequenceCtor)(
-	BSAnimGroupSequence*, // this (0x6C bytes)
-	void*,               // BSAnimGroup*   (kfModel+0x08)
-	void*                // NiSequenceData* (kfModel+0x04)
-	);
-
-static _BSAnimGroupSequenceCtor g_BSAnimGroupSequenceCtor =
-(_BSAnimGroupSequenceCtor)0x0049FD90;
-
 void PreloadCAFSequencesTP()
 {
 
@@ -940,8 +998,6 @@ void PreloadCAFSequencesTP()
 			if (!seq) continue;
 
 			g_BSAnimGroupSequenceCtor(seq, model->animGroup, model->controllerSequence);
-
-			void* src = model->controllerSequence;
 
 			_MESSAGE("CAF PRELOAD: seq created=%p animGroup=%p controller=%p",
 				seq,
@@ -1023,8 +1079,6 @@ void PreloadCAFSequencesFP()
 			if (!seq) continue;
 
 			g_BSAnimGroupSequenceCtor(seq, model->animGroup, model->controllerSequence);
-
-			void* src = model->controllerSequence;
 
 			_MESSAGE("CAF PRELOAD: seq created=%p animGroup=%p controller=%p",
 				seq,
