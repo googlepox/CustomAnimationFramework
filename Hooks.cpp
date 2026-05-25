@@ -36,7 +36,104 @@ static std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_activeCaf
 
 std::unordered_map<NiControllerManager*, Actor*> g_managerToActorMap;
 
+std::unordered_map<NiControllerManager*, std::unordered_map<UInt32, bool>> g_groupBusy;
+
 static thread_local int g_loadAnimDepth = 0;
+
+static UInt32 g_animationFrame = 0;
+
+std::unordered_map<NiControllerManager*, UInt32> g_mgrLastTickSingle;
+std::unordered_map<NiControllerManager*, UInt32> g_mgrLastTickMultiple;
+
+using _65E900 = char(__thiscall*)(TESObjectREFR*);
+_65E900 g_original_65E900 = nullptr;
+
+void __fastcall Hook_65E900(TESObjectREFR* thisPtr, void*)
+{
+	g_animationFrame++;
+	ThisStdCall(0x65E900, thisPtr);
+}
+
+void InstallOnUpdateHook()
+{
+	WriteRelCall(0x40DC70, (UInt32)&Hook_65E900);
+}
+
+struct CAFKey
+{
+	Actor* actor;
+	NiControllerManager* mgr;
+	UInt32 group;
+	const AnimOverrideRule* rule;
+};
+
+struct CAFKeyHash
+{
+	size_t operator()(const CAFKey& k) const noexcept
+	{
+		return ((size_t)k.actor >> 4) ^
+			((size_t)k.mgr << 1) ^
+			(k.group * 2654435761u) ^
+			(size_t)k.rule;
+	}
+};
+
+struct CAFKeyEq
+{
+	bool operator()(const CAFKey& a, const CAFKey& b) const noexcept
+	{
+		return a.actor == b.actor &&
+			a.mgr == b.mgr &&
+			a.group == b.group &&
+			a.rule == b.rule;
+	}
+};
+
+static std::unordered_map<
+	CAFKey,
+	BSAnimGroupSequence*,
+	CAFKeyHash,
+	CAFKeyEq
+> g_actorCAFSeqs;
+
+struct SeqKey
+{
+	NiControllerManager* mgr;
+	BSAnimGroupSequence* seq;
+
+	bool operator==(const SeqKey& o) const
+	{
+		return mgr == o.mgr && seq == o.seq;
+	}
+};
+
+struct SeqKeyHash
+{
+	size_t operator()(const SeqKey& k) const
+	{
+		return (size_t)k.mgr ^ (size_t)k.seq;
+	}
+};
+
+static std::unordered_set<SeqKey, SeqKeyHash> g_added;
+
+struct CAFGroupLock
+{
+	bool* flag;
+
+	CAFGroupLock(std::unordered_map<NiControllerManager*, std::unordered_map<UInt32, bool>>& map,
+		NiControllerManager* mgr,
+		UInt32 group)
+	{
+		flag = &map[mgr][group];
+		*flag = true;
+	}
+
+	~CAFGroupLock()
+	{
+		*flag = false;
+	}
+};
 
 struct CAFSequence
 {
@@ -221,10 +318,6 @@ static void AddCAFAnimGroupSequence(
 		&rule
 		});
 
-	_MESSAGE(
-		"CAF: registered CAF anim '%s'",
-		seq->filePath
-	);
 }
 
 void RegisterCAFSequenceFP(BSAnimGroupSequence* seq, UInt32 expectedGroup)
@@ -237,8 +330,6 @@ void RegisterCAFSequenceFP(BSAnimGroupSequence* seq, UInt32 expectedGroup)
 		if (AnimStringMatch(seq->filePath, rule.replacementFile.c_str()))
 		{
 			g_cafSequencesByGroupFP[expectedGroup].push_back({ seq, &rule });
-			_MESSAGE("CAF FP: registered group=%u file=%s",
-				expectedGroup, seq->filePath);
 			break;
 		}
 	}
@@ -246,10 +337,6 @@ void RegisterCAFSequenceFP(BSAnimGroupSequence* seq, UInt32 expectedGroup)
 
 void RegisterCAFSequence(BSAnimGroupSequence* seq)
 {
-	_MESSAGE("CAF REGISTER: ENTER seq=%p groupPtr=%p filePath=%s",
-		seq,
-		seq ? seq->animGroup : nullptr,
-		seq ? seq->filePath : "<null>");
 
 	if (!seq || !seq->animGroup || !seq->filePath)
 	{
@@ -258,13 +345,8 @@ void RegisterCAFSequence(BSAnimGroupSequence* seq)
 	}
 
 	UInt32 group = seq->animGroup->animGroup;
-	_MESSAGE("CAF REGISTER: group=%u", group);
 
 	const char* fileName = GetFileName(seq->filePath);
-	_MESSAGE("CAF: RegisterCAFSequence group=%u filePath='%s' fileName='%s'",
-		group, seq->filePath, fileName ? fileName : "<null>");
-
-	_MESSAGE("CAF REGISTER: lookup group=%u in rules map", group);
 
 	auto it = g_animOverrideRules.find(group);
 	if (it == g_animOverrideRules.end())
@@ -275,9 +357,6 @@ void RegisterCAFSequence(BSAnimGroupSequence* seq)
 
 	for (AnimOverrideRule& rule : it->second)
 	{
-		_MESSAGE("CAF REGISTER: testing rule='%s' against file='%s'",
-			rule.replacementFile.c_str(),
-			fileName ? fileName : "<null>");
 
 		if (AnimStringMatch(fileName, rule.replacementFile.c_str()))
 		{
@@ -289,9 +368,6 @@ void RegisterCAFSequence(BSAnimGroupSequence* seq)
 				: g_cafSequencesByGroupTP[group];
 
 			target.push_back({ seq, &rule, isFPFile });
-			_MESSAGE("CAF REGISTER: MATCH SUCCESS group=%u file=%s",
-				group,
-				fileName ? fileName : "<null>");
 
 			//AddCAFAnimGroupSequence(g_currentActorRefID, seq, rule);
 
@@ -525,12 +601,10 @@ sub_474510_t Original_sub_474510 = nullptr;
 
 void __fastcall sub_474510_Detour(ActorAnimData* animData, void* edx, TESObjectREFR* a2)
 {
-	_MESSAGE("HOOK HIT");
 	// A2 is the Actor, 'This' is the AnimData. 
 	// This is the point of truth for the link.
 	if (a2 && animData->manager)
 	{
-		_MESSAGE("Inserting actor %08X", a2->refID);
 		g_managerActorCache[animData->manager] = (Actor*)a2;
 	}
 
@@ -546,18 +620,83 @@ void InstallSub_474510_Detour()
 	}
 }
 
-// Per actor+group → their own CAF sequence
-static std::unordered_map<UInt64, BSAnimGroupSequence*> g_actorCAFSeqs;
-
-BSAnimGroupSequence* GetOrCreateActorCAFSeq(
+BSAnimGroupSequence* GetOrCreateActorCAFSeqFP(
 	Actor* actor, UInt32 group, const AnimOverrideRule& rule,
 	NiControllerManager* mgr)
 {
-	UInt64 key = ((UInt64)actor->refID << 32) | group;
+	CAFKey key{ actor, mgr, group, &rule };
 
 	auto it = g_actorCAFSeqs.find(key);
 	if (it != g_actorCAFSeqs.end())
-		return it->second;
+	{
+		BSAnimGroupSequence* cached = it->second;
+
+		// IMPORTANT: validate pointer still belongs to this manager
+		if (cached && cached->controllerMgr == mgr)
+			return cached;
+
+		// stale entry cleanup
+		g_actorCAFSeqs.erase(it);
+	}
+
+	// Find the template sequence
+	auto cafIt = g_cafSequencesByGroupFP.find(group);
+	if (cafIt == g_cafSequencesByGroupFP.end()) return nullptr;
+	BSAnimGroupSequence* tmpl = cafIt->second[0].seq;
+	if (!tmpl) return nullptr;
+
+	// Clone it
+	void* modelLoader = *(void**)0x00B33A1C;
+	std::string path = "Characters\\_1stPerson\\" + rule.replacementFile + ".kf";
+
+	g_loadingCAF = true;
+	kfModel* model = (kfModel*)g_originalLoadKFModel(modelLoader, path.c_str());
+	g_loadingCAF = false;
+
+	if (!model || !model->animGroup) return nullptr;
+
+	BSAnimGroupSequence* seq =
+		(BSAnimGroupSequence*)FormHeap_Allocate(0x6C);
+	if (!seq) return nullptr;
+
+	//memset(seq, 0, 0x6C);
+	g_BSAnimGroupSequenceCtor(seq, model->animGroup, model->controllerSequence);
+	//seq->controllerMgr = mgr;
+	//seq->m_uiRefCount = 1;
+
+	RegisterCAFSequence(seq); // reuses existing matching logic
+	if (seq && seq->filePath)
+	{
+		// Prefix with marker that idle picker won't load
+		std::string fakePath = "_CAF_INTERNAL_" + std::string(seq->filePath);
+		char* newPath = (char*)FormHeap_Allocate(fakePath.size() + 1);
+		strcpy_s(newPath, fakePath.size() + 1, fakePath.c_str());
+		seq->filePath = newPath;
+	}
+
+	g_actorCAFSeqs[key] = seq;
+
+	return seq;
+}
+
+BSAnimGroupSequence* GetOrCreateActorCAFSeqTP(
+	Actor* actor, UInt32 group, const AnimOverrideRule& rule,
+	NiControllerManager* mgr)
+{
+	CAFKey key{ actor, mgr, group, &rule };
+
+	auto it = g_actorCAFSeqs.find(key);
+	if (it != g_actorCAFSeqs.end())
+	{
+		BSAnimGroupSequence* cached = it->second;
+
+		// IMPORTANT: validate pointer still belongs to this manager
+		if (cached && cached->controllerMgr == mgr)
+			return cached;
+
+		// stale entry cleanup
+		g_actorCAFSeqs.erase(it);
+	}
 
 	// Find the template sequence
 	auto cafIt = g_cafSequencesByGroupTP.find(group);
@@ -595,11 +734,40 @@ BSAnimGroupSequence* GetOrCreateActorCAFSeq(
 	}
 
 	g_actorCAFSeqs[key] = seq;
-	_MESSAGE("CAF: created per-actor seq=%p group=%u actor=%08X",
-		seq, group, actor->refID);
 
 	return seq;
 }
+
+typedef void(__thiscall* _ToggleBody)(PlayerCharacter*, char);
+static _ToggleBody OriginalToggleBody = nullptr;
+
+static bool g_isFirstPerson = false;
+
+void __fastcall HookedToggleBody(PlayerCharacter* thisPtr, void*, char a3)
+{
+	// Ensure this is actually the player
+	if (thisPtr == *g_thePlayer)
+	{
+		// a3 == 1 → first person, a3 == 0 → third person
+		g_isFirstPerson = (a3 != 0);
+
+	}
+
+	// Call original engine function
+	OriginalToggleBody(thisPtr, a3);
+}
+
+void InstallToggleBodyHook()
+{
+	if (MH_CreateHook((LPVOID)0x00664F70, (LPVOID)&HookedToggleBody, (LPVOID*)&OriginalToggleBody) == MH_OK)
+	{
+		MH_EnableHook((LPVOID)0x00664F70);
+	}
+}
+
+std::unordered_map<AnimSequenceMultiple*, BSAnimGroupSequence*> g_overrideMap;
+std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_overrideSingleMap;
+static std::unordered_set<BSAnimGroupSequence*> g_registeredSequences;
 
 BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingle* This, void*, int index)
 {
@@ -621,11 +789,15 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 
 	UInt32 actorId = actor->refID;
 	UInt32 group = base->animGroup->animGroup;
+
+	if (g_groupBusy[mgr][group])
+		return base;
+	CAFGroupLock lock(g_groupBusy, mgr, group);
 	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
 
-	bool isFP = IsFirstPersonContext(actor, This);
+	bool useFirstPerson = false;
 
-	auto& map = isFP ? g_cafSequencesByGroupFP : g_cafSequencesByGroupTP;
+	auto& map = useFirstPerson ? g_cafSequencesByGroupFP : g_cafSequencesByGroupTP;
 
 	auto it = map.find(group);
 	if (it == map.end())
@@ -633,34 +805,35 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 		return base;
 	}
 
+
+	BSAnimGroupSequence* chosen = nullptr;
+
 	for (const CAFSequence& caf : it->second)
 	{
+		if (!caf.seq || !caf.rule)
+			continue;
 
-		bool pass = ConditionsPass(*caf.rule, actor, group);
-		if (!caf.seq || !caf.rule) continue;
-		if (pass)
+		if (ConditionsPass(*caf.rule, actor, group))
 		{
-			BSAnimGroupSequence* actorSeq = GetOrCreateActorCAFSeq(actor, group, *caf.rule, mgr);
-			/*if (!g_registeredSingles.contains(This))
-			{
-				caf.seq->m_uiRefCount++;
-				This->AddAnimGroupSequence(caf.seq);
-				caf.seq->controllerMgr = This->Anim->controllerMgr;
-				g_registeredSingles.insert(This);
-			}*/
-			//base->filePath = caf.seq->filePath;
-			g_addSequence(base->controllerMgr, actorSeq, 0, 1);
-			if (!g_registeredSingles.contains(This))
-			{
-				actorSeq->m_uiRefCount++;
-				//This->AddAnimGroupSequence(caf.seq);
-				//caf.seq->controllerMgr = base->controllerMgr;
-				g_registeredSingles.insert(This);
-			}
-
-			return actorSeq;
+			chosen = GetOrCreateActorCAFSeqTP(actor, group, *caf.rule, mgr);
+			break;
 		}
 	}
+
+	if (chosen)
+	{
+		g_addSequence(base->controllerMgr, chosen, 0, 1);
+		g_overrideSingleMap[This] = chosen;
+		chosen->m_uiRefCount++;
+		return chosen;
+	}
+	else
+	{
+		auto it = g_overrideSingleMap.find(This);
+		if (it != g_overrideSingleMap.end())
+			g_overrideSingleMap.erase(it);
+	}
+
 	return base;
 }
 
@@ -677,85 +850,88 @@ static std::unordered_map<AnimSequenceMultiple*, BSAnimGroupSequence*> g_vanilla
 BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 	AnimSequenceMultiple* sequence,
 	void*,
-	int index
-)
+	int index)
 {
 	BSAnimGroupSequence* base =
 		(BSAnimGroupSequence*)ThisStdCall(g_originalGetMultiple, sequence, index);
 
-	if (!base || !base->animGroup) return base;
-
+	if (!base || !base->animGroup)
+		return base;
 
 	NiControllerManager* mgr = base->controllerMgr;
+
 	Actor* actor = nullptr;
 	auto itActor = g_managerToActorMap.find(mgr);
-	if (itActor != g_managerToActorMap.end())
-	{
-		actor = itActor->second;
-		_MESSAGE("Resolved registration for Actor %08X", actor->refID);
-	}
+	if (itActor == g_managerToActorMap.end())
+		return base;
 
-	if (!actor || !InterfaceManager::GetSingleton()->IsGameMode()) return base;
+	actor = itActor->second;
 
-	_MESSAGE("GetMultiple Actor %08X requesting group %d", actor->refID, index);
+	if (!actor || !InterfaceManager::GetSingleton()->IsGameMode())
+		return base;
 
 	UInt32 group = base->animGroup->animGroup;
 
-	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
+	if (g_groupBusy[mgr][group])
+		return base;
 
-	bool isFP = (pc && pc->firstPersonAnimData == actor->GetAnimData());
+	CAFGroupLock lock(g_groupBusy, mgr, group);
 
-	auto& map = isFP ? g_cafSequencesByGroupFP : g_cafSequencesByGroupTP;
+	bool useFirstPerson = false;
+
+	auto& map = useFirstPerson ?
+		g_cafSequencesByGroupFP :
+		g_cafSequencesByGroupTP;
 
 	auto cafIt = map.find(group);
-	if (cafIt == map.end()) return base;
+	if (cafIt == map.end())
+		return base;
 
-	BSAnimGroupSequence* cafSeq = cafIt->second[0].seq;
-	const AnimOverrideRule* rule = cafIt->second[0].rule;
-	if (!cafSeq || !rule) return base;
+	BSAnimGroupSequence* chosen = nullptr;
 
-	if (!g_vanillaBySequence.count(sequence) && base != cafSeq)
-		g_vanillaBySequence[sequence] = base;
-
-	BSAnimGroupSequence* vanilla = g_vanillaBySequence.count(sequence)
-		? g_vanillaBySequence[sequence]
-		: base;
-
-	BSAnimGroupSequence* actorSeq = GetOrCreateActorCAFSeq(actor, group, *rule, mgr);
-	bool condPass = ConditionsPass(*rule, actor, group);
-	if (condPass)
+	// ---------------------------------------
+	// 1. PURE EVALUATION (NO MUTATION)
+	// ---------------------------------------
+	for (const CAFSequence& caf : cafIt->second)
 	{
-		g_addSequence(base->controllerMgr, actorSeq, 0, 1);
-	}
+		if (!caf.seq || !caf.rule)
+			continue;
 
-	if (sequence->Anims)
-	{
-		for (auto* node = sequence->Anims->start; node; node = node->next)
+		if (ConditionsPass(*caf.rule, actor, group))
 		{
-			if (condPass && node->data != actorSeq)
-			{
-				auto& vec = g_vanillaNodesBySequence[sequence];
-				vec.push_back(node->data);
-				node->data = actorSeq;
-			}
-			else if (!condPass)
-			{
-				auto vanillaIt = g_vanillaNodesBySequence.find(sequence);
-				if (vanillaIt != g_vanillaNodesBySequence.end())
-				{
-					auto* node = sequence->Anims->start;
-					for (BSAnimGroupSequence* v : vanillaIt->second)
-					{
-						if (!node) break;
-						node->data = v;
-						node = node->next;
-					}
-				}
-			}
+			chosen = GetOrCreateActorCAFSeqTP(actor, group, *caf.rule, mgr);
+			break;
 		}
 	}
 
-	return condPass ? actorSeq : vanilla;
+	// ---------------------------------------
+	// 2. APPLY OR CLEAR OVERRIDE
+	// ---------------------------------------
+	if (chosen)
+	{
+		SeqKey key{ mgr, chosen };
+
+		if (g_added.find(key) == g_added.end())
+		{
+			g_addSequence(mgr, chosen, 0, 1);
+			g_added.insert(key);
+		}
+
+		g_overrideMap[sequence] = chosen;
+
+		return chosen;
+	}
+
+	// ---------------------------------------
+	// 3. IMPORTANT: CLEAR STALE OVERRIDE
+	// ---------------------------------------
+	auto it = g_overrideMap.find(sequence);
+	if (it != g_overrideMap.end())
+	{
+		g_overrideMap.erase(it);
+	}
+
+	return base;
 }
 
 
@@ -1062,7 +1238,7 @@ void PreloadCAFSequencesFP()
 				rule.replacementFile.c_str(),
 				group);
 
-			std::string path = "Characters\\_1stPerson\\Male\\" + rule.replacementFile + ".kf";
+			std::string path = "Characters\\_1stPerson\\" + rule.replacementFile + ".kf";
 
 			g_loadingCAF = true;
 			kfModel* model = (kfModel*)g_originalLoadKFModel(modelLoader, path.c_str());
@@ -1279,6 +1455,8 @@ void Install()
 {
 	InitializeMyHooks();
 
+	InstallOnUpdateHook();
+
 	g_originalGetMultiple = DetourVtable(
 		0x00A3C768,
 		(UInt32)&GetAnimGroupSequenceMultipleHook
@@ -1305,9 +1483,11 @@ void Install()
 
 	//InstallAddSingleHook();
 
+	//InstallToggleBodyHook();
+
 	InstallLoadKFModelHook();
 	PreloadCAFSequencesTP();
-	PreloadCAFSequencesFP();
+	//PreloadCAFSequencesFP();
 
 	_MESSAGE("CAF: All hooks installed");
 }
