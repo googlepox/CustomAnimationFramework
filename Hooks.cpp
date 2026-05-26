@@ -17,6 +17,7 @@
 #include <GameTasks.h>
 
 #include "MinHook/include/MinHook.h"
+#include <NiAPI.h>
 
 #define AnimString "_CAF"
 
@@ -48,6 +49,8 @@ std::unordered_map<NiControllerManager*, UInt32> g_mgrLastTickMultiple;
 using _65E900 = char(__thiscall*)(TESObjectREFR*);
 _65E900 g_original_65E900 = nullptr;
 
+static UInt8& g_vanityCamState = *(UInt8*)0x00B3BB04;
+
 void __fastcall Hook_65E900(TESObjectREFR* thisPtr, void*)
 {
 	g_animationFrame++;
@@ -57,6 +60,48 @@ void __fastcall Hook_65E900(TESObjectREFR* thisPtr, void*)
 void InstallOnUpdateHook()
 {
 	WriteRelCall(0x40DC70, (UInt32)&Hook_65E900);
+}
+
+struct HeadSnapshot
+{
+	NiMatrix33 rot;
+	NiVector3  trans;
+	float       scale;
+	bool valid = false;
+};
+
+static std::unordered_map<Actor*, HeadSnapshot> g_head;
+
+void CaptureHeadBaseline(Actor* actor, NiNode* head)
+{
+	if (!actor || !head)
+		return;
+
+	HeadSnapshot& snap = g_head[actor];
+
+	if (snap.valid)
+		return;
+
+	snap.rot = head->m_localRotate;
+	snap.trans = head->m_localTranslate;
+	snap.scale = head->m_fLocalScale;
+	snap.valid = true;
+}
+
+void RestoreHeadBaseline(Actor* actor, NiNode* head)
+{
+	if (!actor || !head)
+		return;
+
+	auto it = g_head.find(actor);
+	if (it == g_head.end() || !it->second.valid)
+		return;
+
+	const HeadSnapshot& snap = it->second;
+
+	head->m_localRotate = snap.rot;
+	head->m_localTranslate = snap.trans;
+	head->m_fLocalScale = snap.scale;
 }
 
 struct CAFKey
@@ -706,7 +751,7 @@ BSAnimGroupSequence* GetOrCreateActorCAFSeqTP(
 
 	// Clone it
 	void* modelLoader = *(void**)0x00B33A1C;
-	std::string path = "Characters\\_Male\\" + rule.replacementFile + ".kf";
+	std::string path = "Characters\\_Male\\CAF\\" + rule.replacementFile + ".kf";
 
 	g_loadingCAF = true;
 	kfModel* model = (kfModel*)g_originalLoadKFModel(modelLoader, path.c_str());
@@ -764,6 +809,18 @@ void InstallToggleBodyHook()
 		MH_EnableHook((LPVOID)0x00664F70);
 	}
 }
+
+typedef void(__thiscall* _UpdateAnimDataGraph)(
+	ActorAnimData*,
+	TESObjectREFR*
+	);
+
+_UpdateAnimDataGraph UpdateAnimDataGraph =
+(_UpdateAnimDataGraph)0x00474510;
+
+typedef void(__thiscall* _RefreshPlayerNodes)(PlayerCharacter*);
+_RefreshPlayerNodes RefreshPlayerNodes =
+(_RefreshPlayerNodes)0x006637C0;
 
 std::unordered_map<AnimSequenceMultiple*, BSAnimGroupSequence*> g_overrideMap;
 std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_overrideSingleMap;
@@ -889,9 +946,6 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 
 	BSAnimGroupSequence* chosen = nullptr;
 
-	// ---------------------------------------
-	// 1. PURE EVALUATION (NO MUTATION)
-	// ---------------------------------------
 	for (const CAFSequence& caf : cafIt->second)
 	{
 		if (!caf.seq || !caf.rule)
@@ -904,9 +958,6 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 		}
 	}
 
-	// ---------------------------------------
-	// 2. APPLY OR CLEAR OVERRIDE
-	// ---------------------------------------
 	if (chosen)
 	{
 		SeqKey key{ mgr, chosen };
@@ -922,9 +973,6 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 		return chosen;
 	}
 
-	// ---------------------------------------
-	// 3. IMPORTANT: CLEAR STALE OVERRIDE
-	// ---------------------------------------
 	auto it = g_overrideMap.find(sequence);
 	if (it != g_overrideMap.end())
 	{
@@ -967,24 +1015,35 @@ void* CreateTrampoline(uintptr_t src, size_t patchSize)
 	return tramp;
 }
 
-void InstallHook(uintptr_t addr, void* hook, size_t patchSize)
+void DumpNiAVObject(const char* tag, NiAVObject* obj)
 {
-	void* tramp = CreateTrampoline(addr, patchSize);
-	if (!tramp)
+	if (!obj)
+	{
+		_MESSAGE("%s: NULL node", tag);
 		return;
+	}
 
-	DWORD old;
-	VirtualProtect((void*)addr, patchSize, PAGE_EXECUTE_READWRITE, &old);
+	_MESSAGE("===== %s (%p) =====", tag, obj);
 
-	*(uint8_t*)addr = 0xE9;
-	*(int32_t*)(addr + 1) =
-		(int32_t)((uintptr_t)hook - (addr + 5));
+	_MESSAGE("Flags: 0x%04X", obj->m_flags);
 
-	// NOP remaining bytes
-	for (size_t i = 5; i < patchSize; i++)
-		*(uint8_t*)(addr + i) = 0x90;
+	_MESSAGE("Parent: %p", obj->m_parent);
 
-	VirtualProtect((void*)addr, patchSize, old, &old);
+	_MESSAGE("Name: %s", obj->m_pcName);
+
+	_MESSAGE("LOCAL  T: %f %f %f",
+		obj->m_localTranslate.x,
+		obj->m_localTranslate.y,
+		obj->m_localTranslate.z);
+
+	_MESSAGE("LOCAL  S: %f", obj->m_fLocalScale);
+
+	_MESSAGE("WORLD  T: %f %f %f",
+		obj->m_worldTranslate.x,
+		obj->m_worldTranslate.y,
+		obj->m_worldTranslate.z);
+
+	_MESSAGE("WORLD  S: %f", obj->m_worldScale);
 }
 
 using Actor_LoadAnimGroup_t =
@@ -996,85 +1055,40 @@ signed __int16(__thiscall*)(
 	);
 
 Actor_LoadAnimGroup_t g_originalLoadAnimGroup = nullptr;
+// Define the signature of the function
+typedef void(__thiscall* RestoreCamera_t)(PlayerCharacter* _this);
+
+// Point it to your address
+RestoreCamera_t RestoreCamera = (RestoreCamera_t)0x0066C600;
+
+typedef void(__thiscall* NiAVObject_Update_t)(void* _this, float time, int updateFlags);
+NiAVObject_Update_t NiAVObject_Update = (NiAVObject_Update_t)0x00707370;
 
 signed __int16 __fastcall ActorLoadAnimGroupHook(
-	Actor* actor,
-	void*,
-	int animGroup,
-	int a3,
-	char a4
-)
+	Actor* actor, void*, int animGroup, int a3, char a4)
 {
-	g_inLoadAnimGroup = true;
+	Actor* prevActor = g_currentAnimActor;
+	UInt32 prevGroup = g_currentAnimGroup;
+
 	g_currentAnimActor = actor;
 	g_currentAnimGroup = animGroup;
-	g_currentActorRefID = actor->refID;
 
 	ActorAnimData* animData = actor->GetAnimData();
-
 	if (animData)
 		g_animDataToActor[animData] = actor;
 
-	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
-
-	bool isFP = (pc && pc->firstPersonAnimData == actor->GetAnimData());
-
-	auto& map = isFP ? g_cafSequencesByGroupFP : g_cafSequencesByGroupTP;
-
-	auto it = map.find(animGroup);
-
 	g_loadAnimDepth++;
-
-	if (animData && g_loadAnimDepth == 1)
-	{
-		auto& cafData = g_cafAnimData[g_currentActorRefID];
-		cafData.entries.clear();
-
-		auto it = g_animOverrideRules.find(animGroup);
-		if (it != g_animOverrideRules.end())
-		{
-			for (const AnimOverrideRule& rule : it->second)
-			{
-				if (!ConditionsPass(rule, actor, animGroup))
-					continue;
-
-				BSAnimGroupSequence* cafSeq =
-					FindCAFSequenceForGroup(animGroup, rule, isFP);
-
-				if (!cafSeq)
-					continue;
-
-				CAFAnimEntry entry;
-				entry.seq = cafSeq;
-				entry.rule = &rule;
-
-				void* mgr = *(void**)((char*)animData + 0x98);
-				if (mgr)
-				{
-					for (auto& [group, cafVec] : map)
-					{
-						for (CAFSequence& caf : cafVec)
-						{
-							if (!caf.seq) continue;
-							g_addSequence(mgr, caf.seq, 0, 1);
-						}
-					}
-					g_cafNeedsReregistration = false;
-				}
-			}
-		}
-	}
-
-	signed __int16 result =
-		g_originalLoadAnimGroup(actor, animGroup, a3, a4);
-
+	signed __int16 result = g_originalLoadAnimGroup(actor, animGroup, a3, a4);
 	g_loadAnimDepth--;
 
-	if (g_loadAnimDepth == 0)
+	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
+	if (pc && animData)
 	{
-		g_inLoadAnimGroup = false;
-		g_currentAnimActor = nullptr;
+		NiAVObject_Update((*g_worldSceneGraph)->camera, 0.0, 1);
 	}
+
+	g_currentAnimActor = prevActor;
+	g_currentAnimGroup = prevGroup;
 
 	return result;
 }
@@ -1157,7 +1171,7 @@ void PreloadCAFSequencesTP()
 				rule.replacementFile.c_str(),
 				group);
 
-			std::string path = "Characters\\_Male\\" + rule.replacementFile + ".kf";
+			std::string path = "Characters\\_Male\\CAF\\" + rule.replacementFile + ".kf";
 
 			g_loadingCAF = true;
 			kfModel* model = (kfModel*)g_originalLoadKFModel(modelLoader, path.c_str());

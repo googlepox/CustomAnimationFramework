@@ -207,6 +207,74 @@ bool EditorIDContains(Actor* actor, UInt32, const char* arg)
     return false;
 }
 
+bool Race(Actor* actor, UInt32, const char* arg)
+{
+    if (!actor || !arg)
+        return false;
+
+    TESNPC* npc = OBLIVION_CAST(actor, Actor, TESNPC);
+
+    if (!npc || npc->race.race) return false;
+
+    const char* editorID = npc->race.race->GetEditorName();
+
+    if (!editorID)
+        return false;
+
+    const char* p = arg;
+
+    while (*p)
+    {
+        const char* next = strchr(p, '|');
+        size_t len = next ? (size_t)(next - p) : strlen(p);
+
+        char token[256];
+        if (len >= sizeof(token))
+            len = sizeof(token) - 1;
+
+        memcpy(token, p, len);
+        token[len] = '\0';
+
+        auto icontains = [](const char* a, const char* b) -> bool {
+            if (!a || !b) return false;
+
+            std::string A(a), B(b);
+
+            std::transform(A.begin(), A.end(), A.begin(),
+                [](unsigned char c) { return std::tolower(c); });
+
+            std::transform(B.begin(), B.end(), B.begin(),
+                [](unsigned char c) { return std::tolower(c); });
+
+            return A.find(B) != std::string::npos;
+            };
+
+        if (icontains(editorID, token))
+        {
+            return true;
+        }
+
+        if (!next)
+            break;
+
+        p = next + 1;
+    }
+
+    return false;
+}
+
+bool WeaponOut(Actor* actor, UInt32, const char* arg)
+{
+    if (!actor || !actor->process)
+        return false;
+    return actor->process->GetWeaponOut();
+}
+
+bool IsFemale(Actor* actor, UInt32, const char* arg)
+{
+    return (bool)ThisStdCall(0x5E1DF0, actor);
+}
+
 
 bool LowStamina(Actor* actor, UInt32, const char* arg)
 {
@@ -225,6 +293,9 @@ void RegisterConditions()
     g_conditionRegistry["LowStamina"] = LowStamina;
     g_conditionRegistry["EditorIDContains"] = EditorIDContains;
     g_conditionRegistry["Always"] = Always;
+    g_conditionRegistry["WeaponOut"] = WeaponOut;
+    g_conditionRegistry["IsFemale"] = IsFemale;
+    g_conditionRegistry["Race"] = Race;
 }
 
 AnimConditionFn GetConditionByName(const std::string& name)

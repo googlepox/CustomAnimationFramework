@@ -116,46 +116,30 @@ void LoadCAFInis()
                 while (cond && *cond)
                 {
                     char* comma = std::strchr(cond, ',');
-                    if (comma)
-                        *comma = '\0';
+                    if (comma) *comma = '\0';
 
                     char* token = Trim(cond);
-
                     char* arg = nullptr;
                     char* bracket = std::strchr(token, '[');
                     if (bracket)
                     {
                         *bracket = '\0';
                         arg = bracket + 1;
-
                         char* end = std::strchr(arg, ']');
-                        if (end)
-                            *end = '\0';
+                        if (end) *end = '\0';
                     }
 
                     AnimConditionFn fn = GetConditionByName(token);
-
                     if (fn)
                     {
                         AnimConditionEntry entry;
                         entry.fn = fn;
                         entry.arg = arg ? arg : "";
-
                         conditions.push_back(std::move(entry));
                     }
-                    else
-                    {
-                        _WARNING(
-                            "CAF: Unknown condition '%s' in %s",
-                            token,
-                            path.string().c_str()
-                        );
-                    }
 
-                    if (!comma)
-                        break;
-
-                    cond = comma + 1;
+                    if (!comma) break;      // no more conditions
+                    cond = comma + 1;       // advance past comma
                 }
             }
             g_cafAnimGroups.insert(group);
