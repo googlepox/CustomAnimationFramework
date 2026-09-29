@@ -214,7 +214,7 @@ bool Race(Actor* actor, UInt32, const char* arg)
 
     TESNPC* npc = OBLIVION_CAST(actor, Actor, TESNPC);
 
-    if (!npc || npc->race.race) return false;
+    if (!npc || !npc->race.race) return false;
 
     const char* editorID = npc->race.race->GetEditorName();
 
@@ -268,6 +268,26 @@ bool WeaponOut(Actor* actor, UInt32, const char* arg)
     if (!actor || !actor->process)
         return false;
     return actor->process->GetWeaponOut();
+}
+
+bool IsSneaking(Actor* actor, UInt32, const char* arg)
+{
+    if (!actor || !actor->process)
+        return false;
+
+    UInt32 moveFlags = actor->process->GetMovementFlags();
+
+    return (moveFlags & BaseProcess::kMovementFlag_Sneaking) != 0;
+}
+
+bool IsSwimming(Actor* actor, UInt32, const char* arg)
+{
+    if (!actor || !actor->process)
+        return false;
+
+    UInt32 moveFlags = actor->process->GetMovementFlags();
+
+    return (moveFlags & BaseProcess::kMovementFlag_Swimming) != 0;
 }
 
 bool IsFemale(Actor* actor, UInt32, const char* arg)
