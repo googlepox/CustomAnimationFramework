@@ -21,7 +21,7 @@
 
 #define AnimString "_CAF"
 
-bool g_cafDebug = true;
+bool g_cafDebug = false;
 
 // Use maps instead:
 std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_singleCAFCache;
