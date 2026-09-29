@@ -296,8 +296,6 @@ static bool EndsWithI(const char* fullPath, const char* fileName)
 {
 	if (!fullPath || !fileName)
 		return false;
-	_MESSAGE("fullPath: %s", fullPath);
-	_MESSAGE("fileName: %s", fileName);
 	size_t fullLen = strlen(fullPath);
 	size_t fileLen = strlen(fileName);
 
