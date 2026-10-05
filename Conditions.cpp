@@ -1,6 +1,7 @@
 
 #include "Conditions.h"
 
+#include "EditorIDMapper/EditorIDMapperAPI.h"
 
 #include "obse/GameAPI.h"
 #include "obse/GameObjects.h"
@@ -169,6 +170,11 @@ bool EditorIDContains(Actor* actor, UInt32, const char* arg)
             continue;
 
         const char* editorID = weap->GetEditorName();
+
+        if (!editorID)
+        {
+            editorID = EditorIDMapper::ReverseLookup(actor->refID);
+        }
 
         if (!editorID)
             continue;

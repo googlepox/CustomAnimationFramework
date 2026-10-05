@@ -1,6 +1,8 @@
 #include "obse/PluginAPI.h"
 #include "obse/CommandTable.h"
 
+#include "EditorIDMapper/EditorIDMapperAPI.h"
+
 #if OBLIVION
 #include "obse/GameAPI.h"
 
@@ -37,6 +39,11 @@ IDebugLog		gLog("CustomAnimationFramework.log");
 PluginHandle				g_pluginHandle = kPluginHandle_Invalid;
 
 OBSEMessagingInterface* g_msg;
+
+void UnifiedMessageHandler(OBSEMessagingInterface::Message* msg)
+{
+	EditorIDMapper::MessageHandler(msg);
+}
 
 void MessageHandler(OBSEMessagingInterface::Message* msg)
 {
@@ -102,6 +109,9 @@ extern "C" {
 
 		RegisterConditions();
 		LoadCAFInis();
+
+		EditorIDMapper::Init(g_msg, g_pluginHandle);
+		g_msg->RegisterListener(g_pluginHandle, nullptr, UnifiedMessageHandler);
 		//Install();
 		return true;
 	}
