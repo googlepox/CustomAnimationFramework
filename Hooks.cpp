@@ -1414,13 +1414,11 @@ __declspec(naked) void ActorProcessAction_Detour_Naked()
 		test ecx, ecx
 		jz skip
 
-		pushad
 		push ecx
 		call LogActorProcessAction
 		add esp, 4
-		popad
 
-		skip :
+		skip:
 		jmp[OriginalActorProcessAction]
 	}
 }
