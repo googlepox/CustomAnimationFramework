@@ -876,13 +876,7 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 
 	if (chosen)
 	{
-		SeqKey sk{ base->controllerMgr, chosen };
-
-		if (g_added.find(sk) == g_added.end())
-		{
-			g_addSequence(base->controllerMgr, chosen, 0, 1);
-			g_added.insert(sk);
-		}
+		g_addSequence(base->controllerMgr, chosen, 0, 1);
 		g_overrideSingleMap[This] = chosen;
 		chosen->m_uiRefCount++;
 		return chosen;
