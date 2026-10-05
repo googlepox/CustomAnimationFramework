@@ -23,7 +23,6 @@
 
 bool g_cafDebug = false;
 
-// Use maps instead:
 std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_singleCAFCache;
 std::unordered_map<AnimSequenceMultiple*, std::unordered_map<int, BSAnimGroupSequence*>> g_multipleCAFCache;
 
@@ -50,6 +49,11 @@ using _65E900 = char(__thiscall*)(TESObjectREFR*);
 _65E900 g_original_65E900 = nullptr;
 
 static UInt8& g_vanityCamState = *(UInt8*)0x00B3BB04;
+
+static bool IsFirstPerson(TESObjectREFR* ref)
+{
+	return g_thePlayer && ref == *g_thePlayer && (*g_thePlayer)->isThirdPerson == 0;
+}
 
 void __fastcall Hook_65E900(TESObjectREFR* thisPtr, void*)
 {
@@ -632,13 +636,6 @@ std::unordered_set<AnimSequenceSingle*> g_registeredSingles;
 
 std::unordered_map<NiControllerManager*, Actor*> g_managerActorCache;
 
-bool IsFirstPersonContext(Actor* actor, AnimSequenceSingle* seq)
-{
-	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
-	if (!pc || !g_thePlayer || pc != *g_thePlayer) return false;
-	return pc->isThirdPerson == 0;
-}
-
 typedef void(__thiscall* sub_474510_t)(ActorAnimData* animData, TESObjectREFR* a2);
 sub_474510_t Original_sub_474510 = nullptr;
 
@@ -690,7 +687,7 @@ BSAnimGroupSequence* GetOrCreateActorCAFSeqFP(
 
 	// Clone it
 	void* modelLoader = *(void**)0x00B33A1C;
-	std::string path = "Characters\\_1stPerson\\" + rule.replacementFile + ".kf";
+	std::string path = "Characters\\_1stPerson\\CAF\\" + rule.replacementFile + ".kf";
 
 	g_loadingCAF = true;
 	kfModel* model = (kfModel*)g_originalLoadKFModel(modelLoader, path.c_str());
@@ -781,33 +778,6 @@ BSAnimGroupSequence* GetOrCreateActorCAFSeqTP(
 	return seq;
 }
 
-typedef void(__thiscall* _ToggleBody)(PlayerCharacter*, char);
-static _ToggleBody OriginalToggleBody = nullptr;
-
-static bool g_isFirstPerson = false;
-
-void __fastcall HookedToggleBody(PlayerCharacter* thisPtr, void*, char a3)
-{
-	// Ensure this is actually the player
-	if (thisPtr == *g_thePlayer)
-	{
-		// a3 == 1 → first person, a3 == 0 → third person
-		g_isFirstPerson = (a3 != 0);
-
-	}
-
-	// Call original engine function
-	OriginalToggleBody(thisPtr, a3);
-}
-
-void InstallToggleBodyHook()
-{
-	if (MH_CreateHook((LPVOID)0x00664F70, (LPVOID)&HookedToggleBody, (LPVOID*)&OriginalToggleBody) == MH_OK)
-	{
-		MH_EnableHook((LPVOID)0x00664F70);
-	}
-}
-
 typedef void(__thiscall* _UpdateAnimDataGraph)(
 	ActorAnimData*,
 	TESObjectREFR*
@@ -829,9 +799,20 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 	BSAnimGroupSequence* base = (BSAnimGroupSequence*)ThisStdCall(g_originalGetSingle, This, index);
 
 	if (!This || !This->Anim) return base;
+	
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetSingle enter");
+	}
 
 	NiControllerManager* mgr = This->Anim ? This->Anim->controllerMgr : nullptr;
 	if (!mgr) return base;
+
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetSingle mgr not null");
+	}
+
 
 	Actor* actor = nullptr;
 	auto itActor = g_managerToActorMap.find(mgr);
@@ -842,17 +823,40 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 
 	if (!actor || !InterfaceManager::GetSingleton()->IsGameMode()) return base;
 
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetSingle actor not null");
+	}
+
 	UInt32 actorId = actor->refID;
 	UInt32 group = base->animGroup->animGroup;
 
 	if (g_groupBusy[mgr][group])
 		return base;
+
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetSingle not busy");
+	}
+
+
 	CAFGroupLock lock(g_groupBusy, mgr, group);
 	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
 
-	bool useFirstPerson = false;
+
+	bool useFirstPerson = IsFirstPerson(pc);
 
 	auto& map = useFirstPerson ? g_cafSequencesByGroupFP : g_cafSequencesByGroupTP;
+	if (pc)
+	{
+		PlayerCharacter* pc = *g_thePlayer;
+		ActorAnimData* fpData = pc->firstPersonAnimData;
+		if (fpData && fpData->manager == mgr)
+		{
+			useFirstPerson = true;
+			actor = (Actor*)pc;
+		}
+	}
 
 	auto it = map.find(group);
 	if (it == map.end())
@@ -860,6 +864,10 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 		return base;
 	}
 
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetSingle CAF data found");
+	}
 
 	BSAnimGroupSequence* chosen = nullptr;
 
@@ -870,13 +878,19 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 
 		if (ConditionsPass(*caf.rule, actor, group))
 		{
-			chosen = GetOrCreateActorCAFSeqTP(actor, group, *caf.rule, mgr);
+			chosen = useFirstPerson
+				? GetOrCreateActorCAFSeqFP(actor, group, *caf.rule, mgr)
+				: GetOrCreateActorCAFSeqTP(actor, group, *caf.rule, mgr);
 			break;
 		}
 	}
 
 	if (chosen)
 	{
+		if (g_cafDebug)
+		{
+			_MESSAGE("GetSingle overriding sequence");
+		}
 		g_addSequence(base->controllerMgr, chosen, 0, 1);
 		g_overrideSingleMap[This] = chosen;
 		chosen->m_uiRefCount++;
@@ -887,6 +901,11 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 		auto it = g_overrideSingleMap.find(This);
 		if (it != g_overrideSingleMap.end())
 			g_overrideSingleMap.erase(it);
+	}
+
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetSingle returning base");
 	}
 
 	return base;
@@ -913,6 +932,11 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 	if (!base || !base->animGroup)
 		return base;
 
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetMultiple enter");
+	}
+
 	NiControllerManager* mgr = base->controllerMgr;
 
 	Actor* actor = nullptr;
@@ -920,20 +944,46 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 	if (itActor == g_managerToActorMap.end())
 		return base;
 
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetMultiple actor found");
+	}
+
 	actor = itActor->second;
 
 	if (!actor || !InterfaceManager::GetSingleton()->IsGameMode())
 		return base;
+
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetMultiple actor not null");
+	}
 
 	UInt32 group = base->animGroup->animGroup;
 
 	if (g_groupBusy[mgr][group])
 		return base;
 
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetMultiple not busy");
+	}
+
 	CAFGroupLock lock(g_groupBusy, mgr, group);
 
-	bool useFirstPerson = false;
+	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
 
+	bool useFirstPerson = IsFirstPerson(pc);
+	if (pc)
+	{
+		PlayerCharacter* pc = *g_thePlayer;
+		ActorAnimData* fpData = pc->firstPersonAnimData;
+		if (fpData && fpData->manager == mgr)
+		{
+			useFirstPerson = true;
+			actor = (Actor*)pc;
+		}
+	}
 	auto& map = useFirstPerson ?
 		g_cafSequencesByGroupFP :
 		g_cafSequencesByGroupTP;
@@ -942,6 +992,10 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 	if (cafIt == map.end())
 		return base;
 
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetMultiple CAF data found");
+	}
 	BSAnimGroupSequence* chosen = nullptr;
 
 	for (const CAFSequence& caf : cafIt->second)
@@ -951,7 +1005,9 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 
 		if (ConditionsPass(*caf.rule, actor, group))
 		{
-			chosen = GetOrCreateActorCAFSeqTP(actor, group, *caf.rule, mgr);
+			chosen = useFirstPerson
+				? GetOrCreateActorCAFSeqFP(actor, group, *caf.rule, mgr)
+				: GetOrCreateActorCAFSeqTP(actor, group, *caf.rule, mgr);
 			break;
 		}
 	}
@@ -968,6 +1024,11 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 
 		g_overrideMap[sequence] = chosen;
 
+		if (g_cafDebug)
+		{
+			_MESSAGE("GetMultiple overriding sequence");
+		}
+
 		return chosen;
 	}
 
@@ -977,6 +1038,10 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 		g_overrideMap.erase(it);
 	}
 
+	if (g_cafDebug)
+	{
+		_MESSAGE("GetMultiple returning base");
+	}
 	return base;
 }
 
@@ -1250,7 +1315,7 @@ void PreloadCAFSequencesFP()
 				rule.replacementFile.c_str(),
 				group);
 
-			std::string path = "Characters\\_1stPerson\\" + rule.replacementFile + ".kf";
+			std::string path = "Characters\\_1stPerson\\CAF\\" + rule.replacementFile + ".kf";
 
 			g_loadingCAF = true;
 			kfModel* model = (kfModel*)g_originalLoadKFModel(modelLoader, path.c_str());
@@ -1465,6 +1530,52 @@ void InitializeMyHooks()
 	}
 }
 
+static UInt32 g_after1stPersonReturn = 0x00667EB2;
+
+static void __cdecl Hook_After1stPersonSetup(int playerRef)
+{
+
+	if (!g_thePlayer || !*g_thePlayer)
+	{
+		return;
+	}
+
+	ActorAnimData* fpAnimData = *(ActorAnimData**)(playerRef + 0x5CC);
+
+	if (!fpAnimData || !fpAnimData->manager) return;
+
+	g_managerToActorMap[fpAnimData->manager] = (Actor*)*g_thePlayer;
+}
+
+__declspec(naked) void Hook_After1stPersonSetupNaked()
+{
+	__asm
+	{
+		// save volatile registers
+		push    ecx
+		push    edx
+
+		// call our handler with the player ref (ebp == a1)
+		push    ebp
+		call    Hook_After1stPersonSetup
+		add     esp, 4
+
+		pop     edx
+		pop     ecx
+
+		// stolen bytes from 0x00667EAD
+		mov     ebx, [ebp + 0x58]
+		mov     edi, [ebx]
+
+		jmp[g_after1stPersonReturn]
+	}
+}
+
+void InstallAfter1stPersonSetupHook()
+{
+	WriteRelJump(0x00667EAD, (UInt32)Hook_After1stPersonSetupNaked);
+}
+
 void Install()
 {
 	InitializeMyHooks();
@@ -1494,14 +1605,11 @@ void Install()
 
 	//InstallSingleDtorHook();
 	InstallDisposeActorAnimDataHook();
-
-	//InstallAddSingleHook();
-
-	//InstallToggleBodyHook();
+	InstallAfter1stPersonSetupHook();
 
 	InstallLoadKFModelHook();
 	PreloadCAFSequencesTP();
-	//PreloadCAFSequencesFP();
+	PreloadCAFSequencesFP();
 
 	_MESSAGE("CAF: All hooks installed");
 }
