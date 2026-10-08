@@ -154,7 +154,7 @@ bool UsingStaff(Actor* actor, UInt32, const char* arg)
 
 bool EditorIDContains(Actor* actor, UInt32, const char* arg)
 {
-    if (!actor || !arg || !actor->baseExtraList.m_presenceBitfield)
+    if (!actor || !arg || !actor->baseExtraList.m_presenceBitfield || !actor->baseExtraList.HasType(kExtraData_ContainerChanges))
         return false;
 
     auto items = actor->GetEquippedItems();
