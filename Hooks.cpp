@@ -841,7 +841,7 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 
 
 	CAFGroupLock lock(g_groupBusy, mgr, group);
-	PlayerCharacter* pc = OBLIVION_CAST(actor, Actor, PlayerCharacter);
+	PlayerCharacter* pc = (actor == (Actor*)*g_thePlayer) ? *g_thePlayer : nullptr;
 
 
 	bool useFirstPerson = IsFirstPerson(pc);
