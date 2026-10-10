@@ -26,9 +26,11 @@ bool PlayerOnly(Actor* actor, UInt32, const char* arg)
 
 bool IsPlayableRace(Actor* actor, UInt32, const char* arg)
 {
-    TESNPC* npc = OBLIVION_CAST(actor, Actor, TESNPC);
+    TESForm* base = actor ? actor->baseForm : nullptr;
+    if (!base || base->typeID != kFormType_NPC) return false;
 
-    if (!npc || !npc->race.race) return false;
+    TESNPC* npc = static_cast<TESNPC*>(base);
+    if (!npc->race.race) return false;
 
     return npc->race.race->isPlayable;
 }
