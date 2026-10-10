@@ -5,6 +5,7 @@ struct AnimConditionEntry
 {
     AnimConditionFn fn;
     std::string     arg;
+    bool exclusion;
 };
 
 struct AnimOverrideRule

@@ -119,6 +119,8 @@ void LoadCAFInis()
                     if (comma) *comma = '\0';
 
                     char* token = Trim(cond);
+                    bool negate = false;
+                    if (*token == '!') { negate = true; token = Trim(token + 1); }
                     char* arg = nullptr;
                     char* bracket = std::strchr(token, '[');
                     if (bracket)
@@ -135,6 +137,7 @@ void LoadCAFInis()
                         AnimConditionEntry entry;
                         entry.fn = fn;
                         entry.arg = arg ? arg : "";
+                        entry.exclusion = negate;
                         conditions.push_back(std::move(entry));
                     }
 
