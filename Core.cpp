@@ -52,19 +52,18 @@ bool __cdecl ConditionsPass(
 {
     if (rule.conditions.empty())
         return true;
-    for (const AnimConditionEntry& cond : rule.conditions)
+    for (const AnimConditionEntry& c : rule.conditions)
     {
-        if (!cond.fn)
+        if (!c.fn)
         {
             continue;
         }
 
-        const char* arg = cond.arg.empty() ? nullptr : cond.arg.c_str();
+        const char* arg = c.arg.empty() ? nullptr : c.arg.c_str();
 
-        bool result = cond.fn(actor, group, arg);
-
-        if (!result)
-            return false;
+        bool r = c.fn(actor, group, c.arg.c_str());
+        if (c.exclusion) r = !r;
+        if (!r) return false;
     }
 
     return true;
