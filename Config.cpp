@@ -141,8 +141,8 @@ void LoadCAFInis()
                         conditions.push_back(std::move(entry));
                     }
 
-                    if (!comma) break;      // no more conditions
-                    cond = comma + 1;       // advance past comma
+                    if (!comma) break;
+                    cond = comma + 1;
                 }
             }
             g_cafAnimGroups.insert(group);

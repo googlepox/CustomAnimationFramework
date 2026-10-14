@@ -23,90 +23,19 @@
 
 bool g_cafDebug = false;
 
-std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_singleCAFCache;
-std::unordered_map<AnimSequenceMultiple*, std::unordered_map<int, BSAnimGroupSequence*>> g_multipleCAFCache;
-
-static std::unordered_set<AnimSequenceMultiple*> g_cafInjectedMultiples;
-
-static std::unordered_map<AnimSequenceMultiple*, Actor*> g_multipleToActor;
-
 static std::unordered_map<ActorAnimData*, Actor*> g_animDataToActor;
 
 static std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_activeCafAnims;
 
-std::unordered_map<NiControllerManager*, Actor*> g_managerToActorMap;
+struct ActorRef { Actor* actor; UInt32 refID; };
+
+std::unordered_map<NiControllerManager*, ActorRef> g_managerToActorMap;
 
 std::unordered_map<NiControllerManager*, std::unordered_map<UInt32, bool>> g_groupBusy;
 
 static thread_local int g_loadAnimDepth = 0;
 
 static UInt32 g_animationFrame = 0;
-
-std::unordered_map<NiControllerManager*, UInt32> g_mgrLastTickSingle;
-std::unordered_map<NiControllerManager*, UInt32> g_mgrLastTickMultiple;
-
-using _65E900 = char(__thiscall*)(TESObjectREFR*);
-_65E900 g_original_65E900 = nullptr;
-
-static UInt8& g_vanityCamState = *(UInt8*)0x00B3BB04;
-
-static bool IsFirstPerson(TESObjectREFR* ref)
-{
-	return g_thePlayer && ref == *g_thePlayer && (*g_thePlayer)->isThirdPerson == 0;
-}
-
-void __fastcall Hook_65E900(TESObjectREFR* thisPtr, void*)
-{
-	g_animationFrame++;
-	ThisStdCall(0x65E900, thisPtr);
-}
-
-void InstallOnUpdateHook()
-{
-	WriteRelCall(0x40DC70, (UInt32)&Hook_65E900);
-}
-
-struct HeadSnapshot
-{
-	NiMatrix33 rot;
-	NiVector3  trans;
-	float       scale;
-	bool valid = false;
-};
-
-static std::unordered_map<Actor*, HeadSnapshot> g_head;
-
-void CaptureHeadBaseline(Actor* actor, NiNode* head)
-{
-	if (!actor || !head)
-		return;
-
-	HeadSnapshot& snap = g_head[actor];
-
-	if (snap.valid)
-		return;
-
-	snap.rot = head->m_localRotate;
-	snap.trans = head->m_localTranslate;
-	snap.scale = head->m_fLocalScale;
-	snap.valid = true;
-}
-
-void RestoreHeadBaseline(Actor* actor, NiNode* head)
-{
-	if (!actor || !head)
-		return;
-
-	auto it = g_head.find(actor);
-	if (it == g_head.end() || !it->second.valid)
-		return;
-
-	const HeadSnapshot& snap = it->second;
-
-	head->m_localRotate = snap.rot;
-	head->m_localTranslate = snap.trans;
-	head->m_fLocalScale = snap.scale;
-}
 
 struct CAFKey
 {
@@ -186,8 +115,8 @@ struct CAFGroupLock
 
 struct CAFSequence
 {
-	BSAnimGroupSequence* seq;          // the CAF animation sequence
-	const AnimOverrideRule* rule;      // rule that owns it
+	BSAnimGroupSequence* seq;
+	const AnimOverrideRule* rule;
 	bool firstPerson;
 };
 
@@ -228,14 +157,13 @@ void* g_trampAddSingle = nullptr;
 
 
 
-// Hook the KF model loader - IT'S __thiscall, NOT __cdecl!
 typedef int(__thiscall* _LoadKFModel)(void* This, const char* path);
 _LoadKFModel g_originalLoadKFModel = nullptr;
 
 typedef BSAnimGroupSequence* (__thiscall* _BSAnimGroupSequenceCtor)(
-	BSAnimGroupSequence*, // this (0x6C bytes)
-	void*,               // BSAnimGroup*   (kfModel+0x08)
-	void*                // NiSequenceData* (kfModel+0x04)
+	BSAnimGroupSequence*,
+	void*,
+	void*
 	);
 
 static _BSAnimGroupSequenceCtor g_BSAnimGroupSequenceCtor =
@@ -265,6 +193,21 @@ static std::unordered_map<
 	std::vector<BSAnimGroupSequence*>
 > g_cafSequences;
 
+static bool IsFirstPerson(TESObjectREFR* ref)
+{
+	return g_thePlayer && ref == *g_thePlayer && (*g_thePlayer)->isThirdPerson == 0;
+}
+
+void __fastcall Hook_65E900(TESObjectREFR* thisPtr, void*)
+{
+	g_animationFrame++;
+	ThisStdCall(0x65E900, thisPtr);
+}
+
+void InstallOnUpdateHook()
+{
+	WriteRelCall(0x40DC70, (UInt32)&Hook_65E900);
+}
 
 inline const char* GetFileName(const char* path)
 {
@@ -333,7 +276,6 @@ static bool AnimStringMatch(const char* filePath, const char* rule)
 	std::string f = NormalizeAnimString(GetFileName(filePath));
 	std::string r = NormalizeAnimString(GetFileName(rule));
 
-	// remove trailing "kf"
 	auto stripKF = [](std::string& s) {
 		if (s.size() >= 2 &&
 			s.substr(s.size() - 2) == "kf")
@@ -347,6 +289,22 @@ static bool AnimStringMatch(const char* filePath, const char* rule)
 
 	return f.find(r) != std::string::npos
 		|| r.find(f) != std::string::npos;
+}
+
+static Actor* ResolveActor(NiControllerManager* mgr)
+{
+	auto it = g_managerToActorMap.find(mgr);
+	if (it == g_managerToActorMap.end()) return nullptr;
+
+	Actor* a = it->second.actor;
+	if (LookupFormByID(it->second.refID) != (TESForm*)a) { g_managerToActorMap.erase(it); return nullptr; }
+
+	ActorAnimData* ad = a->GetAnimData();
+	bool isFPMgr = (a == (Actor*)*g_thePlayer) && (*g_thePlayer)->firstPersonAnimData
+		&& (*g_thePlayer)->firstPersonAnimData->manager == mgr;
+	if (!isFPMgr && (!ad || ad->manager != mgr)) { g_managerToActorMap.erase(it); return nullptr; }
+
+	return a;
 }
 
 static void AddCAFAnimGroupSequence(
@@ -431,12 +389,8 @@ void __fastcall AddSingleHook(
 	BSAnimGroupSequence* anim
 )
 {
-	// IMPORTANT: do NOT touch actor globals here
-
-	// Let engine behave normally first
 	ThisStdCall((UInt32)g_originalAddSingle, This, anim);
 
-	// Only bind if we already know actor from a SAFE source
 	auto it = g_animDataToActor.begin();
 
 	for (; it != g_animDataToActor.end(); ++it)
@@ -447,7 +401,6 @@ void __fastcall AddSingleHook(
 		if (!data || !actor)
 			continue;
 
-		// bind ONLY if this AnimSequenceSingle belongs to this actor's animData
 		if (actor->GetAnimData() == data)
 		{
 			g_singleToActor[This] = actor;
@@ -456,11 +409,10 @@ void __fastcall AddSingleHook(
 	}
 }
 
-// The function you already hook — call it directly for preloading
 typedef AnimSequenceSingle* (__thiscall* _ActorAnimData_AddAnimation)(
-	ActorAnimData*,   // this
-	kfModel*,         // the loaded KF
-	bool              // bDeferred — pass 0!
+	ActorAnimData*,
+	kfModel*,
+	bool
 	);
 static _ActorAnimData_AddAnimation g_addAnimation =
 (_ActorAnimData_AddAnimation)0x00474070;
@@ -476,6 +428,11 @@ static std::unordered_map<AnimSequenceSingle*, BSAnimGroupSequence*> g_vanillaSi
 ActorAnimData* (__thiscall* DisposeActorAnimData)(ActorAnimData*) = (ActorAnimData * (__thiscall*)(ActorAnimData*))0x475B60;
 ActorAnimData* __fastcall DisposeActorAnimDataHook(ActorAnimData* This, UInt32 edx)
 {
+	if (NiControllerManager* mgr = This->manager)
+	{
+		g_managerToActorMap.erase(mgr);
+		g_groupBusy.erase(mgr);
+	}
 	g_animDataToActor.erase(This);
 	g_vanillaSingleAnims.clear();
 	return DisposeActorAnimData(This);
@@ -498,10 +455,8 @@ bool __fastcall AddAnimationHook(ActorAnimData* This, UInt32 edx, kfModel* Model
 	if (g_cafDebug)
 		_MESSAGE("AddAnimation called, model=%p", Model);
 
-	// Call original
 	bool result = (bool)ThisStdCall(g_originalAddAnimation, This, Model, Arg);
 
-	// After vanilla animations are added, add CAF animations
 	if (g_currentAnimActor && result)
 	{
 		UInt32 group = g_currentAnimGroup;
@@ -513,10 +468,6 @@ bool __fastcall AddAnimationHook(ActorAnimData* This, UInt32 edx, kfModel* Model
 			{
 				if (ConditionsPass(rule, g_currentAnimActor, group))
 				{
-					// TODO: Load the CAF KF file here
-					// You need to create a kfModel* for the CAF file
-					// Then call AddAnimation again with it
-
 					if (g_cafDebug)
 					{
 						_MESSAGE(
@@ -565,11 +516,9 @@ BSAnimGroupSequence* FindCAFSequenceForGroup(
 		if (!AnimStringMatch(caf.seq->filePath, rule.replacementFile.c_str()))
 			continue;
 
-		// exact match wins immediately
 		return caf.seq;
 	}
 
-	// optional fallback behavior (important for debugging)
 	return fallback;
 }
 
@@ -593,24 +542,19 @@ void __fastcall AddMultipleHook(
 
 void RemoveAnimGroupSequence(AnimSequenceBase* This, BSAnimGroupSequence* seqToRemove)
 {
-	// 1. Cast to the manager's sequence array
-	// Assuming the NiTArray is at offset 0x3C
 	NiTArray<BSAnimGroupSequence*>* seqList = (NiTArray<BSAnimGroupSequence*>*)((char*)This + 0x3C);
 
 	for (UInt16 i = 0; i < seqList->numObjs; i++)
 	{
 		if (seqList->data[i] == seqToRemove)
 		{
-			// 2. Perform the shift
-			// Move all subsequent pointers down by 1 to fill the hole
 			for (UInt16 j = i; j < seqList->numObjs - 1; j++)
 			{
 				seqList->data[j] = seqList->data[j + 1];
 			}
 
-			// 3. Decrement the count
 			seqList->numObjs--;
-			seqList->data[seqList->numObjs] = nullptr; // Null the tail
+			seqList->data[seqList->numObjs] = nullptr;
 			break;
 		}
 	}
@@ -623,15 +567,13 @@ static _NiTMapGetAt g_animsMapGetAt = (_NiTMapGetAt)0x00470960;
 
 static std::unordered_set<BSAnimGroupSequence*> g_registeredWithManager;
 
-// Force the controller manager to update its sequence cache
 typedef void(__thiscall* _UpdateSequence)(NiControllerManager* mgr, NiControllerSequence* seq);
-_UpdateSequence UpdateSeq = (_UpdateSequence)0x006C7A20; // Verify this address in your binary
+_UpdateSequence UpdateSeq = (_UpdateSequence)0x006C7A20;
 
 BSAnimGroupSequence* (__thiscall* GetAnimGroupSequenceSingle)(AnimSequenceSingle*, int) = (BSAnimGroupSequence * (__thiscall*)(AnimSequenceSingle*, int))0x00471710;
-// Global tracking
+
 std::map<UInt32, bool> g_actorRegistrationState;
 
-// Track the LAST sequence object we registered for this actor
 std::unordered_set<AnimSequenceSingle*> g_registeredSingles;
 
 std::unordered_map<NiControllerManager*, Actor*> g_managerActorCache;
@@ -641,14 +583,11 @@ sub_474510_t Original_sub_474510 = nullptr;
 
 void __fastcall sub_474510_Detour(ActorAnimData* animData, void* edx, TESObjectREFR* a2)
 {
-	// A2 is the Actor, 'This' is the AnimData. 
-	// This is the point of truth for the link.
 	if (a2 && animData->manager)
 	{
 		g_managerActorCache[animData->manager] = (Actor*)a2;
 	}
 
-	// Call the original to ensure the engine initializes the AnimData properly
 	Original_sub_474510(animData, a2);
 }
 
@@ -671,21 +610,17 @@ BSAnimGroupSequence* GetOrCreateActorCAFSeqFP(
 	{
 		BSAnimGroupSequence* cached = it->second;
 
-		// IMPORTANT: validate pointer still belongs to this manager
 		if (cached && cached->controllerMgr == mgr)
 			return cached;
 
-		// stale entry cleanup
 		g_actorCAFSeqs.erase(it);
 	}
 
-	// Find the template sequence
 	auto cafIt = g_cafSequencesByGroupFP.find(group);
 	if (cafIt == g_cafSequencesByGroupFP.end()) return nullptr;
 	BSAnimGroupSequence* tmpl = cafIt->second[0].seq;
 	if (!tmpl) return nullptr;
 
-	// Clone it
 	void* modelLoader = *(void**)0x00B33A1C;
 	std::string path = "Characters\\_1stPerson\\CAF\\" + rule.replacementFile + ".kf";
 
@@ -699,15 +634,11 @@ BSAnimGroupSequence* GetOrCreateActorCAFSeqFP(
 		(BSAnimGroupSequence*)FormHeap_Allocate(0x6C);
 	if (!seq) return nullptr;
 
-	//memset(seq, 0, 0x6C);
 	g_BSAnimGroupSequenceCtor(seq, model->animGroup, model->controllerSequence);
-	//seq->controllerMgr = mgr;
-	//seq->m_uiRefCount = 1;
 
-	RegisterCAFSequence(seq); // reuses existing matching logic
+	RegisterCAFSequence(seq);
 	if (seq && seq->filePath)
 	{
-		// Prefix with marker that idle picker won't load
 		std::string fakePath = "_CAF_INTERNAL_" + std::string(seq->filePath);
 		char* newPath = (char*)FormHeap_Allocate(fakePath.size() + 1);
 		strcpy_s(newPath, fakePath.size() + 1, fakePath.c_str());
@@ -730,21 +661,17 @@ BSAnimGroupSequence* GetOrCreateActorCAFSeqTP(
 	{
 		BSAnimGroupSequence* cached = it->second;
 
-		// IMPORTANT: validate pointer still belongs to this manager
 		if (cached && cached->controllerMgr == mgr)
 			return cached;
 
-		// stale entry cleanup
 		g_actorCAFSeqs.erase(it);
 	}
 
-	// Find the template sequence
 	auto cafIt = g_cafSequencesByGroupTP.find(group);
 	if (cafIt == g_cafSequencesByGroupTP.end()) return nullptr;
 	BSAnimGroupSequence* tmpl = cafIt->second[0].seq;
 	if (!tmpl) return nullptr;
 
-	// Clone it
 	void* modelLoader = *(void**)0x00B33A1C;
 	std::string path = "Characters\\_Male\\CAF\\" + rule.replacementFile + ".kf";
 
@@ -758,15 +685,11 @@ BSAnimGroupSequence* GetOrCreateActorCAFSeqTP(
 		(BSAnimGroupSequence*)FormHeap_Allocate(0x6C);
 	if (!seq) return nullptr;
 
-	//memset(seq, 0, 0x6C);
 	g_BSAnimGroupSequenceCtor(seq, model->animGroup, model->controllerSequence);
-	//seq->controllerMgr = mgr;
-	//seq->m_uiRefCount = 1;
 
-	RegisterCAFSequence(seq); // reuses existing matching logic
+	RegisterCAFSequence(seq);
 	if (seq && seq->filePath)
 	{
-		// Prefix with marker that idle picker won't load
 		std::string fakePath = "_CAF_INTERNAL_" + std::string(seq->filePath);
 		char* newPath = (char*)FormHeap_Allocate(fakePath.size() + 1);
 		strcpy_s(newPath, fakePath.size() + 1, fakePath.c_str());
@@ -818,7 +741,7 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceSingleHook(AnimSequenceSingl
 	auto itActor = g_managerToActorMap.find(mgr);
 	if (itActor != g_managerToActorMap.end())
 	{
-		actor = itActor->second;
+		Actor* actor = ResolveActor(mgr);
 	}
 
 	if (!actor || !InterfaceManager::GetSingleton()->IsGameMode()) return base;
@@ -946,7 +869,6 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 
 	NiControllerManager* mgr = base->controllerMgr;
 
-	Actor* actor = nullptr;
 	auto itActor = g_managerToActorMap.find(mgr);
 	if (itActor == g_managerToActorMap.end())
 		return base;
@@ -956,7 +878,7 @@ BSAnimGroupSequence* __fastcall GetAnimGroupSequenceMultipleHook(
 		_MESSAGE("GetMultiple actor found");
 	}
 
-	actor = itActor->second;
+	Actor* actor = ResolveActor(mgr);
 
 	if (!actor || !InterfaceManager::GetSingleton()->IsGameMode())
 		return base;
@@ -1068,10 +990,8 @@ void* CreateTrampoline(uintptr_t src, size_t patchSize)
 	if (!tramp)
 		return nullptr;
 
-	// copy stolen bytes
 	memcpy(tramp, (void*)src, patchSize);
 
-	// calculate jump back
 	uintptr_t srcNext = src + patchSize;
 	uintptr_t trampNext = (uintptr_t)(tramp + patchSize);
 
@@ -1079,7 +999,6 @@ void* CreateTrampoline(uintptr_t src, size_t patchSize)
 	*(int32_t*)(tramp + patchSize + 1) =
 		(int32_t)(srcNext - (trampNext + 5));
 
-	// IMPORTANT: ensure CPU sees new code
 	FlushInstructionCache(GetCurrentProcess(), tramp, patchSize + 5);
 
 	return tramp;
@@ -1125,10 +1044,9 @@ signed __int16(__thiscall*)(
 	);
 
 Actor_LoadAnimGroup_t g_originalLoadAnimGroup = nullptr;
-// Define the signature of the function
+
 typedef void(__thiscall* RestoreCamera_t)(PlayerCharacter* _this);
 
-// Point it to your address
 RestoreCamera_t RestoreCamera = (RestoreCamera_t)0x0066C600;
 
 typedef void(__thiscall* NiAVObject_Update_t)(void* _this, float time, int updateFlags);
@@ -1164,8 +1082,6 @@ signed __int16 __fastcall ActorLoadAnimGroupHook(
 }
 
 
-// AnimSequenceSingle dtor address — find via the calltrace
-// 0x004717F1 - 0x91 = 0x00471760
 typedef void(__thiscall* _AnimSequenceSingleDtor)(AnimSequenceSingle*);
 static _AnimSequenceSingleDtor g_originalAnimSequenceSingleDtor =
 (_AnimSequenceSingleDtor)CreateTrampoline(0x00471760, 7);
@@ -1199,7 +1115,7 @@ void InstallAddSingleHook()
 {
 	g_originalAddSingle =
 		(void(__thiscall*)(AnimSequenceSingle*, BSAnimGroupSequence*))DetourVtable(
-			0x00A3C730, // your AddSingle vtable address
+			0x00A3C730,
 			(UInt32)&AddSingleHook
 		);
 
@@ -1272,10 +1188,9 @@ void PreloadCAFSequencesTP()
 				seq,
 				seq ? seq->filePath : "<null>");
 
-			RegisterCAFSequence(seq); // reuses existing matching logic
+			RegisterCAFSequence(seq);
 			if (seq && seq->filePath)
 			{
-				// Prefix with marker that idle picker won't load
 				std::string fakePath = "_CAF_INTERNAL_" + std::string(seq->filePath);
 				char* newPath = (char*)FormHeap_Allocate(fakePath.size() + 1);
 				strcpy_s(newPath, fakePath.size() + 1, fakePath.c_str());
@@ -1353,10 +1268,9 @@ void PreloadCAFSequencesFP()
 				seq,
 				seq ? seq->filePath : "<null>");
 
-			RegisterCAFSequenceFP(seq, group); // reuses existing matching logic
+			RegisterCAFSequenceFP(seq, group);
 			if (seq && seq->filePath)
 			{
-				// Prefix with marker that idle picker won't load
 				std::string fakePath = "_CAF_INTERNAL_" + std::string(seq->filePath);
 				char* newPath = (char*)FormHeap_Allocate(fakePath.size() + 1);
 				strcpy_s(newPath, fakePath.size() + 1, fakePath.c_str());
@@ -1381,30 +1295,23 @@ int __fastcall LoadKFModelHook(void* This, UInt32 edx, const char* path)
 	return g_originalLoadKFModel(This, path);
 }
 
-// Install hook
 void InstallLoadKFModelHook()
 {
 	UInt32 hookAddr = 0x00439FF0;
 
-	// Allocate executable trampoline
 	static UInt8 trampoline[32];
 
-	// Make trampoline executable
 	DWORD oldProtect;
 	VirtualProtect(trampoline, sizeof(trampoline), PAGE_EXECUTE_READWRITE, &oldProtect);
 
-	// Copy original bytes
 	memcpy(trampoline, (void*)hookAddr, 7);
 
-	// Add jump back to original function
 	UInt32 returnAddr = hookAddr + 7;
-	trampoline[7] = 0xE9; // JMP opcode
+	trampoline[7] = 0xE9;
 	*(UInt32*)(trampoline + 8) = returnAddr - ((UInt32)trampoline + 12);
 
-	// Set function pointer
 	g_originalLoadKFModel = (_LoadKFModel)(void*)trampoline;
 
-	// Install hook at original location
 	WriteRelJump(hookAddr, (UInt32)LoadKFModelHook);
 
 	_MESSAGE("CAF: Installed LoadKFModel hook at 0x%08X", hookAddr);
@@ -1421,20 +1328,17 @@ static Actor* s_tempActor = nullptr;
 
 void LogActorProcessAction(Actor* actor)
 {
-	if (!actor)
-		return;
-
-	if (!actor->GetAnimData())
-		return;
-
-	g_managerToActorMap[actor->GetAnimData()->manager] = actor;
+	if (!actor) return;
+	ActorAnimData* ad = actor->GetAnimData();
+	if (!ad || !ad->manager) return;
+	g_managerToActorMap[ad->manager] = { actor, actor->refID };
 }
 
 __declspec(naked) void Sub65D790Hook()
 {
 	__asm
 	{
-		mov[s_tempActor], ecx      // save actor* before pushad
+		mov[s_tempActor], ecx
 
 		pushad
 
@@ -1551,18 +1455,16 @@ static void __cdecl Hook_After1stPersonSetup(int playerRef)
 
 	if (!fpAnimData || !fpAnimData->manager) return;
 
-	g_managerToActorMap[fpAnimData->manager] = (Actor*)*g_thePlayer;
+	g_managerToActorMap[fpAnimData->manager] = { (Actor*)*g_thePlayer, (*g_thePlayer)->refID };
 }
 
 __declspec(naked) void Hook_After1stPersonSetupNaked()
 {
 	__asm
 	{
-		// save volatile registers
 		push    ecx
 		push    edx
 
-		// call our handler with the player ref (ebp == a1)
 		push    ebp
 		call    Hook_After1stPersonSetup
 		add     esp, 4
@@ -1570,7 +1472,6 @@ __declspec(naked) void Hook_After1stPersonSetupNaked()
 		pop     edx
 		pop     ecx
 
-		// stolen bytes from 0x00667EAD
 		mov     ebx, [ebp + 0x58]
 		mov     edi, [ebx]
 
@@ -1601,16 +1502,7 @@ void Install()
 
 	Install65D790Hook();
 	InstallActorProcessActionHook();
-	//InstallSub_474510_Detour();
 
-	//WriteRelCall(0x4741D9, (UInt32)&NewAnimSequenceMultipleHook);
-
-	//g_originalLoadAnimGroup =
-		//(Actor_LoadAnimGroup_t)CreateTrampoline(0x005E5690, 7);
-
-	//WriteRelJump(0x005E5690, (UInt32)ActorLoadAnimGroupHook);
-
-	//InstallSingleDtorHook();
 	InstallDisposeActorAnimDataHook();
 	InstallAfter1stPersonSetupHook();
 

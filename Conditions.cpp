@@ -154,12 +154,37 @@ bool UsingStaff(Actor* actor, UInt32, const char* arg)
     return false;
 }
 
+static __declspec(noinline) void GetEquippedItemsInner(Actor* actor, EquippedItemsList& out)
+{
+    out = actor->GetEquippedItems();
+}
+
+bool GetEquippedItemsSafe(Actor* actor, EquippedItemsList& out)
+{
+    __try
+    {
+        GetEquippedItemsInner(actor, out);
+        return true;
+    }
+    __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION)
+    {
+        return false;
+    }
+}
+
 bool EditorIDContains(Actor* actor, UInt32, const char* arg)
 {
-    if (!actor || !arg || !actor->baseExtraList.m_presenceBitfield || !actor->baseExtraList.HasType(kExtraData_ContainerChanges))
+    if (!actor || !arg || !actor->baseForm || actor->baseForm->typeID != kFormType_NPC || 
+        !actor->baseExtraList.m_presenceBitfield || !actor->baseExtraList.HasType(kExtraData_ContainerChanges))
         return false;
 
-    auto items = actor->GetEquippedItems();
+    EquippedItemsList items;
+
+    if (!GetEquippedItemsSafe(actor, items))
+        return false;
+
+    if (items.empty())
+        return false;
 
     for (size_t i = 0; i < items.size(); i++)
     {
